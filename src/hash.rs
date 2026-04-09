@@ -1,0 +1,303 @@
+use rustc_hash::FxHashSet;
+
+use crate::normalize::NormalizedNode;
+
+/// A function with its computed hash values.
+pub struct HashedFunction {
+    /// Index into the original `Vec<FunctionFragment>`.
+    pub fragment_index: usize,
+    /// Hash of the entire normalized function tree (full depth, for exact matching).
+    pub root_hash: u64,
+    /// Depth-truncated subtree hashes (for Jaccard similarity).
+    ///
+    /// Each node's hash captures structure up to [`SUBTREE_HASH_DEPTH`] levels
+    /// below it. A leaf change propagates at most that many levels up, avoiding
+    /// the cascade problem where a single change invalidates every ancestor hash.
+    pub subtree_hashes: FxHashSet<u64>,
+}
+
+/// Node kinds where child order is irrelevant for clone detection.
+const COMMUTATIVE_KINDS: &[&str] = &["binary_operator", "boolean_operator"];
+
+/// Maximum depth for truncated subtree hashing.
+///
+/// Each node's subtree hash considers descendants up to this many levels below.
+/// A leaf change propagates at most this many levels up in the subtree hash set.
+/// Higher values capture more structure but cascade further on changes.
+const SUBTREE_HASH_DEPTH: usize = 3;
+
+/// Hash a normalized function tree using xxh3.
+///
+/// Computes two kinds of hashes:
+/// - **Root hash**: full-depth bottom-up hash for exact clone matching.
+/// - **Subtree hashes**: depth-truncated hashes for Jaccard near-miss detection.
+///   Each node's hash only sees [`SUBTREE_HASH_DEPTH`] levels of descendants,
+///   so a leaf change doesn't cascade to the root.
+///
+/// When `sort_commutative` is true, children of commutative operator nodes are
+/// sorted by hash before concatenation, so `a op b` and `b op a` hash identically.
+pub fn hash_function(
+    normalized: &NormalizedNode,
+    fragment_index: usize,
+    min_subtree_nodes: usize,
+    sort_commutative: bool,
+) -> HashedFunction {
+    let mut subtree_hashes = FxHashSet::default();
+    let (root_hash, _depth_hashes, _count) =
+        hash_node(normalized, min_subtree_nodes, sort_commutative, &mut subtree_hashes);
+    HashedFunction { fragment_index, root_hash, subtree_hashes }
+}
+
+/// Compute a hash from kind + separator, with no child information.
+fn hash_kind_only(kind: &str) -> u64 {
+    let mut buf = Vec::with_capacity(kind.len() + 1);
+    buf.extend_from_slice(kind.as_bytes());
+    buf.push(0);
+    xxhash_rust::xxh3::xxh3_64(&buf)
+}
+
+/// Recursively hash a node.
+///
+/// Returns `(full_hash, depth_hashes, node_count)` where:
+/// - `full_hash`: unlimited-depth hash for exact matching
+/// - `depth_hashes[d]`: hash seeing only `d` levels of descendants
+/// - `node_count`: total nodes in this subtree
+fn hash_node(
+    node: &NormalizedNode,
+    min_nodes: usize,
+    sort_commutative: bool,
+    hashes: &mut FxHashSet<u64>,
+) -> (u64, [u64; SUBTREE_HASH_DEPTH + 1], usize) {
+    if node.children.is_empty() {
+        // Leaf node: hash kind + text. Same at all depths.
+        let text = node.text.as_deref().unwrap_or("");
+        let mut buf = Vec::with_capacity(node.kind.len() + 1 + text.len());
+        buf.extend_from_slice(node.kind.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(text.as_bytes());
+        let hash = xxhash_rust::xxh3::xxh3_64(&buf);
+        if min_nodes <= 1 {
+            hashes.insert(hash);
+        }
+        return (hash, [hash; SUBTREE_HASH_DEPTH + 1], 1);
+    }
+
+    // Recurse on children
+    let mut child_data: Vec<(u64, [u64; SUBTREE_HASH_DEPTH + 1])> =
+        Vec::with_capacity(node.children.len());
+    let mut total_count = 1usize;
+    for child in &node.children {
+        let (full_h, depth_h, count) = hash_node(child, min_nodes, sort_commutative, hashes);
+        child_data.push((full_h, depth_h));
+        total_count += count;
+    }
+
+    // Sort for commutative operators (canonical ordering by full hash)
+    if sort_commutative && COMMUTATIVE_KINDS.contains(&node.kind) {
+        child_data.sort_unstable_by_key(|&(full_h, _)| full_h);
+    }
+
+    // Full hash (unlimited depth) for root_hash / exact matching
+    let mut buf = Vec::with_capacity(node.kind.len() + 1 + child_data.len() * 8);
+    buf.extend_from_slice(node.kind.as_bytes());
+    buf.push(0);
+    for &(full_h, _) in &child_data {
+        buf.extend_from_slice(&full_h.to_le_bytes());
+    }
+    let full_hash = xxhash_rust::xxh3::xxh3_64(&buf);
+
+    // Depth-truncated hashes
+    let mut depth_hashes = [0u64; SUBTREE_HASH_DEPTH + 1];
+    // Depth 0: just kind, ignore children
+    depth_hashes[0] = hash_kind_only(node.kind);
+    // Depth d: kind + children's depth[d-1] hashes
+    for d in 1..=SUBTREE_HASH_DEPTH {
+        buf.clear();
+        buf.extend_from_slice(node.kind.as_bytes());
+        buf.push(0);
+        for (_, child_dh) in &child_data {
+            buf.extend_from_slice(&child_dh[d - 1].to_le_bytes());
+        }
+        depth_hashes[d] = xxhash_rust::xxh3::xxh3_64(&buf);
+    }
+
+    // Add the deepest truncated hash to the Jaccard set
+    if total_count >= min_nodes {
+        hashes.insert(depth_hashes[SUBTREE_HASH_DEPTH]);
+    }
+
+    (full_hash, depth_hashes, total_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(kind: &'static str, text: &str) -> NormalizedNode {
+        NormalizedNode { kind, text: Some(text.to_owned()), children: vec![] }
+    }
+
+    fn node(kind: &'static str, children: Vec<NormalizedNode>) -> NormalizedNode {
+        NormalizedNode { kind, text: None, children }
+    }
+
+    #[test]
+    fn identical_trees_produce_same_hash() {
+        let tree1 =
+            node("binary_operator", vec![leaf("identifier", "$0"), leaf("identifier", "$1")]);
+        let tree2 =
+            node("binary_operator", vec![leaf("identifier", "$0"), leaf("identifier", "$1")]);
+
+        let h1 = hash_function(&tree1, 0, 5, false);
+        let h2 = hash_function(&tree2, 1, 5, false);
+        assert_eq!(h1.root_hash, h2.root_hash);
+    }
+
+    #[test]
+    fn different_trees_produce_different_hash() {
+        let tree1 =
+            node("binary_operator", vec![leaf("identifier", "$0"), leaf("identifier", "$1")]);
+        let tree2 = node("binary_operator", vec![leaf("identifier", "$0"), leaf("integer", "42")]);
+
+        let h1 = hash_function(&tree1, 0, 5, false);
+        let h2 = hash_function(&tree2, 1, 5, false);
+        assert_ne!(h1.root_hash, h2.root_hash);
+    }
+
+    #[test]
+    fn subtree_hashes_populated() {
+        // A tree with 7 nodes: root -> (left: a -> (b, c), right: d -> (e, f))
+        let tree = node(
+            "root",
+            vec![
+                node("left", vec![leaf("b", "1"), leaf("c", "2")]),
+                node("right", vec![leaf("e", "3"), leaf("f", "4")]),
+            ],
+        );
+
+        let h = hash_function(&tree, 0, 3, false);
+        // The root (7 nodes), left subtree (3 nodes), right subtree (3 nodes) all >= 3
+        assert!(h.subtree_hashes.len() >= 3);
+    }
+
+    #[test]
+    fn subtree_hashes_respect_min_nodes() {
+        let tree = node("root", vec![leaf("a", "1"), leaf("b", "2")]);
+        // Tree has 3 nodes total. With min_nodes=5, only very large subtrees qualify.
+        let h = hash_function(&tree, 0, 5, false);
+        assert!(h.subtree_hashes.is_empty());
+    }
+
+    #[test]
+    fn leaf_only_tree() {
+        let tree = leaf("identifier", "foo");
+        let h = hash_function(&tree, 0, 1, false);
+        assert_ne!(h.root_hash, 0);
+        assert_eq!(h.subtree_hashes.len(), 1);
+    }
+
+    #[test]
+    fn hash_is_deterministic() {
+        let tree = node(
+            "function",
+            vec![leaf("identifier", "$0"), node("block", vec![leaf("return", "$0")])],
+        );
+        let h1 = hash_function(&tree, 0, 1, false);
+        let h2 = hash_function(&tree, 0, 1, false);
+        assert_eq!(h1.root_hash, h2.root_hash);
+        assert_eq!(h1.subtree_hashes, h2.subtree_hashes);
+    }
+
+    #[test]
+    fn sort_commutative_swapped_operands_same_hash() {
+        // a op b vs b op a — should hash identically when sort_commutative=true
+        let tree1 =
+            node("binary_operator", vec![leaf("identifier", "$0"), leaf("identifier", "$1")]);
+        let tree2 =
+            node("binary_operator", vec![leaf("identifier", "$1"), leaf("identifier", "$0")]);
+
+        let h1 = hash_function(&tree1, 0, 1, true);
+        let h2 = hash_function(&tree2, 1, 1, true);
+        assert_eq!(h1.root_hash, h2.root_hash);
+    }
+
+    #[test]
+    fn sort_commutative_off_swapped_operands_differ() {
+        // Without sort_commutative, swapped operands should differ
+        let tree1 =
+            node("binary_operator", vec![leaf("identifier", "$0"), leaf("identifier", "$1")]);
+        let tree2 =
+            node("binary_operator", vec![leaf("identifier", "$1"), leaf("identifier", "$0")]);
+
+        let h1 = hash_function(&tree1, 0, 1, false);
+        let h2 = hash_function(&tree2, 1, 1, false);
+        assert_ne!(h1.root_hash, h2.root_hash);
+    }
+
+    #[test]
+    fn sort_commutative_non_commutative_node_unchanged() {
+        // Non-commutative node kinds should not be affected
+        let tree1 = node("call", vec![leaf("identifier", "foo"), leaf("identifier", "bar")]);
+        let tree2 = node("call", vec![leaf("identifier", "bar"), leaf("identifier", "foo")]);
+
+        let h1 = hash_function(&tree1, 0, 1, true);
+        let h2 = hash_function(&tree2, 1, 1, true);
+        assert_ne!(h1.root_hash, h2.root_hash);
+    }
+
+    #[test]
+    fn truncated_hashing_limits_cascade() {
+        // Two trees identical except for one deep leaf text.
+        // With truncated hashing, the change should only affect nearby nodes'
+        // subtree hashes, not cascade to the root.
+        let tree1 = node(
+            "function",
+            vec![
+                node(
+                    "block",
+                    vec![
+                        node("if", vec![leaf("cond", "true"), node("body", vec![leaf("x", "1")])]),
+                        node("assign", vec![leaf("target", "$0"), leaf("value", "same")]),
+                        node("return", vec![leaf("result", "$0")]),
+                    ],
+                ),
+                node("params", vec![leaf("param", "$0"), leaf("param", "$1")]),
+            ],
+        );
+        let tree2 = node(
+            "function",
+            vec![
+                node(
+                    "block",
+                    vec![
+                        node(
+                            "if",
+                            vec![leaf("cond", "true"), node("body", vec![leaf("x", "CHANGED")])],
+                        ),
+                        node("assign", vec![leaf("target", "$0"), leaf("value", "same")]),
+                        node("return", vec![leaf("result", "$0")]),
+                    ],
+                ),
+                node("params", vec![leaf("param", "$0"), leaf("param", "$1")]),
+            ],
+        );
+
+        let h1 = hash_function(&tree1, 0, 1, false);
+        let h2 = hash_function(&tree2, 1, 1, false);
+
+        // Root hashes differ (full depth, the change cascades all the way up)
+        assert_ne!(h1.root_hash, h2.root_hash);
+
+        // Subtree hash Jaccard should be high — truncation limits cascade
+        let intersection = h1.subtree_hashes.intersection(&h2.subtree_hashes).count();
+        let union_size = h1.subtree_hashes.union(&h2.subtree_hashes).count();
+        let jaccard = intersection as f64 / union_size as f64;
+        // Without truncation, Jaccard would be ~0.47 (full cascade).
+        // With depth-3 truncation, it should be measurably higher.
+        assert!(
+            jaccard > 0.5,
+            "expected higher Jaccard due to truncation limiting cascade, got {jaccard:.3} \
+             (intersection={intersection}, union={union_size})"
+        );
+    }
+}
