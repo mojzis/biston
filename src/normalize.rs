@@ -19,6 +19,9 @@ pub struct NormalizedNode {
 }
 
 impl PartialEq for NormalizedNode {
+    /// Compares structural content only (kind, text, children).
+    /// `byte_range` is intentionally excluded — it's source-position metadata
+    /// that differs between structurally identical functions at different locations.
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind && self.text == other.text && self.children == other.children
     }

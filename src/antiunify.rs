@@ -1,5 +1,9 @@
 use crate::normalize::NormalizedNode;
 
+/// Sentinel node representing an absent child (one side has more children than the other).
+const MISSING_NODE: NormalizedNode =
+    NormalizedNode { kind: "<missing>", text: None, children: vec![], byte_range: None };
+
 /// A node in the anti-unification template.
 #[derive(Debug, Clone)]
 pub enum TemplateNode {
@@ -57,14 +61,10 @@ fn anti_unify_rec(
 
     // Extra children on either side become holes.
     for extra in &left.children[common_len..] {
-        let dummy =
-            NormalizedNode { kind: "<missing>", text: None, children: vec![], byte_range: None };
-        children.push(make_hole(extra, &dummy, counter));
+        children.push(make_hole(extra, &MISSING_NODE, counter));
     }
     for extra in &right.children[common_len..] {
-        let dummy =
-            NormalizedNode { kind: "<missing>", text: None, children: vec![], byte_range: None };
-        children.push(make_hole(&dummy, extra, counter));
+        children.push(make_hole(&MISSING_NODE, extra, counter));
     }
 
     TemplateNode::Shared { kind: left.kind, text: left.text.clone(), children }
