@@ -6,7 +6,7 @@ use crate::config::NormalizationConfig;
 ///
 /// Local identifiers are replaced with positional placeholders, comments and
 /// docstrings are stripped, and other normalizations are applied according to config.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct NormalizedNode {
     /// The tree-sitter node kind (e.g. `identifier`, `binary_operator`).
     pub kind: &'static str,
@@ -14,7 +14,17 @@ pub struct NormalizedNode {
     pub text: Option<String>,
     /// Normalized children.
     pub children: Vec<Self>,
+    /// Byte range in the original source. `None` for stripped nodes.
+    pub byte_range: Option<std::ops::Range<usize>>,
 }
+
+impl PartialEq for NormalizedNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.text == other.text && self.children == other.children
+    }
+}
+
+impl Eq for NormalizedNode {}
 
 /// Normalize a function's AST subtree for comparison.
 ///
@@ -73,22 +83,32 @@ fn normalize_node(
 
     // Strip comments
     if kind == "comment" {
-        return NormalizedNode { kind: "comment", text: None, children: vec![] };
+        return NormalizedNode { kind: "comment", text: None, children: vec![], byte_range: None };
     }
 
     // Strip docstrings (expression_statement containing a single string at function body start)
     if kind == "expression_statement" && is_docstring(node) {
-        return NormalizedNode { kind: "docstring", text: None, children: vec![] };
+        return NormalizedNode {
+            kind: "docstring",
+            text: None,
+            children: vec![],
+            byte_range: None,
+        };
     }
 
     // Strip type annotations
     if config.strip_type_annotations && is_type_annotation_node(kind) {
-        return NormalizedNode { kind, text: None, children: vec![] };
+        return NormalizedNode { kind, text: None, children: vec![], byte_range: None };
     }
 
     // Strip decorators
     if config.strip_decorators && kind == "decorator" {
-        return NormalizedNode { kind: "decorator", text: None, children: vec![] };
+        return NormalizedNode {
+            kind: "decorator",
+            text: None,
+            children: vec![],
+            byte_range: None,
+        };
     }
 
     // Collect locals from binding constructs before recursing into children
@@ -96,8 +116,15 @@ fn normalize_node(
 
     // Anonymize the function's own name (it's not relevant for structural comparison).
     // The function name is the `name` field of the `function_definition` parent.
+    let range = Some(node.start_byte()..node.end_byte());
+
     if kind == "identifier" && is_function_name(node) {
-        return NormalizedNode { kind, text: Some("<fn>".to_owned()), children: vec![] };
+        return NormalizedNode {
+            kind,
+            text: Some("<fn>".to_owned()),
+            children: vec![],
+            byte_range: range,
+        };
     }
 
     // Handle identifier nodes
@@ -113,19 +140,29 @@ fn normalize_node(
         } else {
             text
         };
-        return NormalizedNode { kind, text: Some(normalized_text), children: vec![] };
+        return NormalizedNode {
+            kind,
+            text: Some(normalized_text),
+            children: vec![],
+            byte_range: range,
+        };
     }
 
     // Handle literals
     if is_literal_kind(kind) {
         let text =
             if config.anonymize_literals { format!("<{kind}>") } else { node_text(node, source) };
-        return NormalizedNode { kind, text: Some(text), children: vec![] };
+        return NormalizedNode { kind, text: Some(text), children: vec![], byte_range: range };
     }
 
     // Leaf node (named node with no named children, not identifier/literal)
     if node.named_child_count() == 0 {
-        return NormalizedNode { kind, text: Some(node_text(node, source)), children: vec![] };
+        return NormalizedNode {
+            kind,
+            text: Some(node_text(node, source)),
+            children: vec![],
+            byte_range: range,
+        };
     }
 
     // Internal node — recurse into named children
@@ -136,7 +173,7 @@ fn normalize_node(
         children.push(normalized);
     }
 
-    NormalizedNode { kind, text: None, children }
+    NormalizedNode { kind, text: None, children, byte_range: range }
 }
 
 /// Check if an identifier node is the name of a `function_definition`.

@@ -134,11 +134,11 @@ mod tests {
     use super::*;
 
     fn leaf(kind: &'static str, text: &str) -> NormalizedNode {
-        NormalizedNode { kind, text: Some(text.to_owned()), children: vec![] }
+        NormalizedNode { kind, text: Some(text.to_owned()), children: vec![], byte_range: None }
     }
 
     fn node(kind: &'static str, children: Vec<NormalizedNode>) -> NormalizedNode {
-        NormalizedNode { kind, text: None, children }
+        NormalizedNode { kind, text: None, children, byte_range: None }
     }
 
     #[test]
