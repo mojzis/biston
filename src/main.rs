@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -71,6 +72,10 @@ fn main() -> anyhow::Result<()> {
             }
             if suggest {
                 config.suggest.enabled = true;
+            }
+
+            if config.output.format == OutputFormat::Text && std::io::stdout().is_terminal() {
+                config.output.color = true;
             }
 
             let report = biston::scan(&path, &config)?;
