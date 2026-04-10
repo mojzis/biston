@@ -7,6 +7,7 @@ pub mod normalize;
 pub mod parse;
 pub mod report;
 pub mod similarity;
+pub mod stats;
 
 use std::path::Path;
 
@@ -29,8 +30,10 @@ struct ProcessedFunction {
 pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     // 1. Discover files
     let files = discovery::discover_files(root, &config.scan)?;
+    let files_scanned = files.len();
     if files.is_empty() {
         return Ok(CloneReport {
+            files_scanned: 0,
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
@@ -98,7 +101,13 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     if processed.len() < 2 {
         let (functions, normalized): (Vec<_>, Vec<_>) =
             processed.into_iter().map(|p| (p.fragment, p.normalized)).unzip();
-        return Ok(CloneReport { functions, normalized, pairs: vec![], suggestions: vec![] });
+        return Ok(CloneReport {
+            files_scanned,
+            functions,
+            normalized,
+            pairs: vec![],
+            suggestions: vec![],
+        });
     }
 
     // 4. Destructure into parallel vecs and find similar pairs
@@ -112,37 +121,44 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     }
     let pairs = similarity::find_similar_functions(&hashed, config.scan.threshold);
 
-    let suggestions = if config.suggest.enabled {
-        pairs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, pair)| {
-                let left_norm = &normalized[pair.left];
-                let right_norm = &normalized[pair.right];
-                let template = antiunify::anti_unify(left_norm, right_norm);
-                let quality =
-                    antiunify::score_template(&template, left_norm, right_norm, &config.suggest);
-                if quality.suppressed {
-                    return None;
-                }
-                let rendered = if config.suggest.render_python {
-                    Some(antiunify::render_template(
-                        &template,
-                        &functions[pair.left].source_text,
-                        functions[pair.left].byte_range.start,
-                    ))
-                } else {
-                    None
-                };
-                Some(Suggestion { pair_index: i, quality, rendered })
-            })
-            .collect()
-    } else {
-        vec![]
-    };
+    let suggestions = generate_suggestions(&pairs, &normalized, &functions, &config.suggest);
 
     debug_assert_eq!(functions.len(), normalized.len());
-    Ok(CloneReport { functions, normalized, pairs, suggestions })
+    Ok(CloneReport { files_scanned, functions, normalized, pairs, suggestions })
+}
+
+fn generate_suggestions(
+    pairs: &[crate::similarity::SimilarPair],
+    normalized: &[NormalizedNode],
+    functions: &[FunctionFragment],
+    config: &crate::config::SuggestConfig,
+) -> Vec<Suggestion> {
+    if !config.enabled {
+        return vec![];
+    }
+    pairs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, pair)| {
+            let left_norm = &normalized[pair.left];
+            let right_norm = &normalized[pair.right];
+            let template = antiunify::anti_unify(left_norm, right_norm);
+            let quality = antiunify::score_template(&template, left_norm, right_norm, config);
+            if quality.suppressed {
+                return None;
+            }
+            let rendered = if config.render_python {
+                Some(antiunify::render_template(
+                    &template,
+                    &functions[pair.left].source_text,
+                    functions[pair.left].byte_range.start,
+                ))
+            } else {
+                None
+            };
+            Some(Suggestion { pair_index: i, quality, rendered })
+        })
+        .collect()
 }
 
 /// Find the first `function_definition` node in a tree (DFS).
