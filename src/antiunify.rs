@@ -1,3 +1,4 @@
+use crate::config::SuggestConfig;
 use crate::normalize::{is_literal_kind, NormalizedNode};
 
 /// Sentinel node representing an absent child (one side has a child, the other doesn't).
@@ -72,6 +73,102 @@ fn is_statement_kind(kind: &str) -> bool {
             | "with_statement"
             | "expression_statement"
     )
+}
+
+impl TemplateNode {
+    /// Count of `Shared` nodes (recursively).
+    pub fn count_shared(&self) -> usize {
+        match self {
+            Self::Shared { children, .. } => {
+                1 + children.iter().map(Self::count_shared).sum::<usize>()
+            }
+            Self::Hole { .. } => 0,
+        }
+    }
+
+    /// Count of `Hole` nodes (recursively).
+    pub fn count_holes(&self) -> usize {
+        match self {
+            Self::Shared { children, .. } => children.iter().map(Self::count_holes).sum::<usize>(),
+            Self::Hole { .. } => 1,
+        }
+    }
+}
+
+/// Count total nodes in a `NormalizedNode` tree.
+fn count_nodes(node: &NormalizedNode) -> usize {
+    1 + node.children.iter().map(count_nodes).sum::<usize>()
+}
+
+/// Quality assessment of an anti-unification template.
+#[derive(Debug, Clone)]
+pub struct TemplateQuality {
+    /// Ratio of shared nodes to total nodes (0.0 - 1.0).
+    pub score: f64,
+    /// Number of holes in the template.
+    pub hole_count: usize,
+    /// Largest hole as a fraction of the smaller original tree.
+    pub max_hole_fraction: f64,
+    /// Whether the suggestion should be suppressed.
+    pub suppressed: bool,
+    /// Reason for suppression, if any.
+    pub reason: Option<String>,
+}
+
+/// Collect hole sizes from a template: for each hole, the max of left/right node counts.
+fn collect_hole_sizes(template: &TemplateNode, sizes: &mut Vec<usize>) {
+    match template {
+        TemplateNode::Shared { children, .. } => {
+            for child in children {
+                collect_hole_sizes(child, sizes);
+            }
+        }
+        TemplateNode::Hole { left, right, .. } => {
+            sizes.push(count_nodes(left).max(count_nodes(right)));
+        }
+    }
+}
+
+/// Score a template's quality for suggesting an abstraction.
+pub fn score_template(
+    template: &TemplateNode,
+    left: &NormalizedNode,
+    right: &NormalizedNode,
+    config: &SuggestConfig,
+) -> TemplateQuality {
+    let shared_nodes = template.count_shared();
+    let hole_count = template.count_holes();
+
+    let mut hole_sizes = Vec::new();
+    collect_hole_sizes(template, &mut hole_sizes);
+    let hole_total: usize = hole_sizes.iter().sum();
+
+    let total_nodes = shared_nodes + hole_total;
+    let score = if total_nodes == 0 { 0.0 } else { shared_nodes as f64 / total_nodes as f64 };
+
+    let smaller_tree_size = count_nodes(left).min(count_nodes(right));
+    let max_hole_fraction = if smaller_tree_size == 0 {
+        0.0
+    } else {
+        hole_sizes.iter().map(|&s| s as f64 / smaller_tree_size as f64).fold(0.0_f64, f64::max)
+    };
+
+    let mut suppressed = false;
+    let mut reason = None;
+
+    if hole_count > config.max_holes {
+        suppressed = true;
+        reason = Some(format!("too many holes: {hole_count} > {}", config.max_holes));
+    } else if max_hole_fraction > 0.5 {
+        suppressed = true;
+        reason =
+            Some(format!("largest hole is {:.0}% of the smaller tree", max_hole_fraction * 100.0));
+    } else if score < config.min_quality {
+        suppressed = true;
+        reason = Some(format!("quality score {score:.2} below threshold {}", config.min_quality));
+    }
+
+    TemplateQuality { score, hole_count, max_hole_fraction, suppressed, reason }
 }
 
 /// Anti-unify two `NormalizedNode` trees, producing a `TemplateNode` template.
@@ -346,5 +443,119 @@ mod tests {
             }
             TemplateNode::Hole { .. } => panic!("expected Shared, got Hole"),
         }
+    }
+
+    // --- Quality scoring tests ---
+
+    fn default_suggest() -> SuggestConfig {
+        SuggestConfig::default()
+    }
+
+    #[test]
+    fn count_shared_and_holes() {
+        let template = TemplateNode::Shared {
+            kind: "block",
+            text: None,
+            children: vec![
+                TemplateNode::Shared { kind: "return", text: None, children: vec![] },
+                TemplateNode::Hole {
+                    name: "$HOLE_0".to_owned(),
+                    classification: HoleKind::Identifier,
+                    left: leaf("identifier", "a"),
+                    right: leaf("identifier", "b"),
+                },
+            ],
+        };
+        assert_eq!(template.count_shared(), 2);
+        assert_eq!(template.count_holes(), 1);
+    }
+
+    #[test]
+    fn score_all_shared() {
+        let node = make_node(
+            "block",
+            None,
+            vec![leaf("return_statement", "return"), leaf("integer", "42")],
+        );
+        let template = anti_unify(&node, &node);
+
+        let quality = score_template(&template, &node, &node, &default_suggest());
+        assert!((quality.score - 1.0).abs() < f64::EPSILON);
+        assert_eq!(quality.hole_count, 0);
+        assert!(!quality.suppressed);
+    }
+
+    #[test]
+    fn score_one_small_hole() {
+        let left = make_node(
+            "block",
+            None,
+            vec![leaf("return_statement", "return"), leaf("identifier", "x"), leaf("integer", "1")],
+        );
+        let right = make_node(
+            "block",
+            None,
+            vec![leaf("return_statement", "return"), leaf("identifier", "y"), leaf("integer", "1")],
+        );
+        let template = anti_unify(&left, &right);
+
+        let quality = score_template(&template, &left, &right, &default_suggest());
+        // 3 shared (root + 2 matching leaves), 1 hole (1 node), total = 4, score = 0.75
+        assert!((quality.score - 0.75).abs() < f64::EPSILON);
+        assert_eq!(quality.hole_count, 1);
+        assert!(!quality.suppressed);
+    }
+
+    #[test]
+    fn score_too_many_holes() {
+        let left_children: Vec<_> = (0..6).map(|i| leaf("identifier", &format!("a{i}"))).collect();
+        let right_children: Vec<_> = (0..6).map(|i| leaf("identifier", &format!("b{i}"))).collect();
+        let left = make_node("block", None, left_children);
+        let right = make_node("block", None, right_children);
+        let template = anti_unify(&left, &right);
+
+        let quality = score_template(&template, &left, &right, &default_suggest());
+        assert_eq!(quality.hole_count, 6);
+        assert!(quality.suppressed);
+        assert!(quality.reason.as_ref().unwrap().contains("too many holes"));
+    }
+
+    #[test]
+    fn score_large_hole() {
+        // A tree where the single hole is >50% of the smaller tree.
+        let left = make_node(
+            "block",
+            None,
+            vec![make_node(
+                "if_statement",
+                None,
+                vec![leaf("identifier", "a"), leaf("integer", "2")],
+            )],
+        );
+        let right = make_node(
+            "block",
+            None,
+            vec![make_node("for_statement", None, vec![leaf("identifier", "b")])],
+        );
+        let template = anti_unify(&left, &right);
+
+        let quality = score_template(&template, &left, &right, &default_suggest());
+        // Hole contains the entire child subtree, which is >50% of either tree
+        assert!(quality.max_hole_fraction > 0.5);
+        assert!(quality.suppressed);
+        assert!(quality.reason.as_ref().unwrap().contains("largest hole"));
+    }
+
+    #[test]
+    fn score_below_threshold() {
+        let left = make_node("block", None, vec![leaf("a", "a"), leaf("b", "b"), leaf("c", "c")]);
+        let right = make_node("block", None, vec![leaf("x", "x"), leaf("y", "y"), leaf("z", "z")]);
+        let template = anti_unify(&left, &right);
+
+        let quality = score_template(&template, &left, &right, &default_suggest());
+        // 1 shared root, 3 holes of 1 node each = 4 total, score = 0.25
+        assert!(quality.score < 0.6);
+        assert!(quality.suppressed);
+        assert!(quality.reason.as_ref().unwrap().contains("quality score"));
     }
 }

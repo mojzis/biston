@@ -9,6 +9,24 @@ pub struct Config {
     pub scan: ScanConfig,
     pub normalization: NormalizationConfig,
     pub output: OutputConfig,
+    pub suggest: SuggestConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SuggestConfig {
+    /// Minimum template coverage score to suggest (0.0 - 1.0).
+    pub min_quality: f64,
+    /// Maximum number of holes before suppressing.
+    pub max_holes: usize,
+    /// Whether to render templates as Python source.
+    pub render_python: bool,
+}
+
+impl Default for SuggestConfig {
+    fn default() -> Self {
+        Self { min_quality: 0.6, max_holes: 5, render_python: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -219,6 +237,32 @@ context_lines = 5
         let dir = tempfile::tempdir().expect("tempdir");
         let config = Config::load(dir.path()).expect("load");
         assert_eq!(config.scan.min_lines, 10);
+    }
+
+    #[test]
+    fn suggest_section_parses_from_toml() {
+        let toml_str = r"
+[suggest]
+min_quality = 0.8
+max_holes = 3
+render_python = false
+";
+        let config: Config = toml::from_str(toml_str).expect("should parse");
+        assert!((config.suggest.min_quality - 0.8).abs() < f64::EPSILON);
+        assert_eq!(config.suggest.max_holes, 3);
+        assert!(!config.suggest.render_python);
+    }
+
+    #[test]
+    fn suggest_defaults_when_absent() {
+        let toml_str = r"
+[scan]
+min_lines = 5
+";
+        let config: Config = toml::from_str(toml_str).expect("should parse");
+        assert!((config.suggest.min_quality - 0.6).abs() < f64::EPSILON);
+        assert_eq!(config.suggest.max_holes, 5);
+        assert!(config.suggest.render_python);
     }
 
     #[test]
