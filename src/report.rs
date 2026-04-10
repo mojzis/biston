@@ -4,10 +4,21 @@ use anyhow::Context;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 
+use crate::antiunify::TemplateQuality;
 use crate::config::OutputConfig;
 use crate::extract::FunctionFragment;
 use crate::normalize::NormalizedNode;
 use crate::similarity::SimilarPair;
+
+/// A suggested abstraction for a pair of similar functions.
+pub struct Suggestion {
+    /// Index into `CloneReport.pairs`.
+    pub pair_index: usize,
+    /// Quality assessment.
+    pub quality: TemplateQuality,
+    /// Rendered Python template (if rendering is enabled).
+    pub rendered: Option<String>,
+}
 
 /// The full clone detection report.
 pub struct CloneReport {
@@ -15,6 +26,8 @@ pub struct CloneReport {
     /// Normalized AST for each function (parallel to `functions`).
     pub normalized: Vec<NormalizedNode>,
     pub pairs: Vec<SimilarPair>,
+    /// Suggested abstractions for clone pairs.
+    pub suggestions: Vec<Suggestion>,
 }
 
 /// A cluster of mutually similar functions.
@@ -116,6 +129,31 @@ fn union(parent: &mut [usize], rank: &mut [usize], x: usize, y: usize) {
     }
 }
 
+/// Build a map from `pair_index` to suggestion for quick lookup.
+fn suggestion_map(suggestions: &[Suggestion]) -> FxHashMap<usize, &Suggestion> {
+    suggestions.iter().map(|s| (s.pair_index, s)).collect()
+}
+
+/// Find suggestions relevant to a cluster (any pair whose left and right are both members).
+fn cluster_suggestions<'a>(
+    cluster: &CloneCluster,
+    pairs: &[SimilarPair],
+    sug_map: &'a FxHashMap<usize, &'a Suggestion>,
+) -> Vec<&'a Suggestion> {
+    let members: rustc_hash::FxHashSet<usize> = cluster.members.iter().copied().collect();
+    pairs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, pair)| {
+            if members.contains(&pair.left) && members.contains(&pair.right) {
+                sug_map.get(&i).copied()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Format the report as human-readable text.
 pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
     let clusters = cluster_pairs(&report.pairs, report.functions.len());
@@ -128,6 +166,8 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
 
     let count = clusters.len().min(config.max_results);
     let _ = writeln!(output, "Found {count} clone cluster(s):\n");
+
+    let sug_map = suggestion_map(&report.suggestions);
 
     for (i, cluster) in clusters.iter().take(config.max_results).enumerate() {
         let _ = writeln!(
@@ -171,6 +211,21 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
             }
         }
 
+        // Append suggestions for this cluster
+        let suggestions = cluster_suggestions(cluster, &report.pairs, &sug_map);
+        for sug in suggestions {
+            let _ = writeln!(
+                output,
+                "  Suggested abstraction (quality: {:.2}, holes: {}):",
+                sug.quality.score, sug.quality.hole_count
+            );
+            if let Some(ref rendered) = sug.rendered {
+                for line in rendered.lines() {
+                    let _ = writeln!(output, "    {line}");
+                }
+            }
+        }
+
         let _ = writeln!(output);
     }
 
@@ -181,6 +236,8 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
 #[derive(Serialize)]
 struct JsonReport {
     clusters: Vec<JsonCluster>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suggestions: Vec<JsonSuggestion>,
 }
 
 #[derive(Serialize)]
@@ -197,6 +254,15 @@ struct JsonFunction {
     end_line: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+}
+
+#[derive(Serialize)]
+struct JsonSuggestion {
+    pair_index: usize,
+    quality_score: f64,
+    hole_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rendered: Option<String>,
 }
 
 /// Format the report as JSON.
@@ -230,13 +296,25 @@ pub fn format_json(report: &CloneReport, config: &OutputConfig) -> anyhow::Resul
         })
         .collect();
 
-    let json_report = JsonReport { clusters: json_clusters };
+    let json_suggestions: Vec<JsonSuggestion> = report
+        .suggestions
+        .iter()
+        .map(|s| JsonSuggestion {
+            pair_index: s.pair_index,
+            quality_score: s.quality.score,
+            hole_count: s.quality.hole_count,
+            rendered: s.rendered.clone(),
+        })
+        .collect();
+
+    let json_report = JsonReport { clusters: json_clusters, suggestions: json_suggestions };
     serde_json::to_string_pretty(&json_report).context("failed to serialize JSON report")
 }
 
 /// Format the report as SARIF (Static Analysis Results Interchange Format).
 pub fn format_sarif(report: &CloneReport, _config: &OutputConfig) -> anyhow::Result<String> {
     let clusters = cluster_pairs(&report.pairs, report.functions.len());
+    let sug_map = suggestion_map(&report.suggestions);
 
     let results: Vec<serde_json::Value> = clusters
         .iter()
@@ -264,16 +342,32 @@ pub fn format_sarif(report: &CloneReport, _config: &OutputConfig) -> anyhow::Res
             let member_names: Vec<String> =
                 cluster.members.iter().map(|&idx| report.functions[idx].name.clone()).collect();
 
+            let mut message = format!(
+                "Clone cluster #{} (similarity: {:.2}): {}",
+                i + 1,
+                cluster.min_similarity,
+                member_names.join(", ")
+            );
+
+            // Append suggestion info if available
+            let suggestions = cluster_suggestions(cluster, &report.pairs, &sug_map);
+            for sug in suggestions {
+                use std::fmt::Write;
+                let _ = write!(
+                    message,
+                    "\nSuggested abstraction (quality: {:.2}, holes: {})",
+                    sug.quality.score, sug.quality.hole_count
+                );
+                if let Some(ref rendered) = sug.rendered {
+                    let _ = write!(message, "\n{rendered}");
+                }
+            }
+
             serde_json::json!({
                 "ruleId": "biston/clone-detected",
                 "level": "warning",
                 "message": {
-                    "text": format!(
-                        "Clone cluster #{} (similarity: {:.2}): {}",
-                        i + 1,
-                        cluster.min_similarity,
-                        member_names.join(", ")
-                    )
+                    "text": message
                 },
                 "locations": [locations.first()],
                 "relatedLocations": locations.iter().skip(1).collect::<Vec<_>>()
@@ -363,6 +457,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
         };
         let config = OutputConfig { show_source: false, ..OutputConfig::default() };
         let text = format_text(&report, &config);
@@ -374,7 +469,12 @@ mod tests {
 
     #[test]
     fn text_format_no_clones() {
-        let report = CloneReport { functions: vec![], normalized: vec![], pairs: vec![] };
+        let report = CloneReport {
+            functions: vec![],
+            normalized: vec![],
+            pairs: vec![],
+            suggestions: vec![],
+        };
         let config = OutputConfig::default();
         let text = format_text(&report, &config);
         assert!(text.contains("No clones detected"));
@@ -391,6 +491,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9), make_pair(2, 3, 0.8)],
+            suggestions: vec![],
         };
         let config = OutputConfig { max_results: 1, show_source: false, ..OutputConfig::default() };
         let text = format_text(&report, &config);
@@ -409,6 +510,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
         };
         let config = OutputConfig { show_source: false, ..OutputConfig::default() };
         let json = format_json(&report, &config).expect("format");
@@ -425,6 +527,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
         };
         let config = OutputConfig { show_source: false, ..OutputConfig::default() };
         let json = format_json(&report, &config).expect("format");
@@ -448,6 +551,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
         };
         let config = OutputConfig::default();
         let sarif = format_sarif(&report, &config).expect("format");
@@ -463,6 +567,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
         };
         let config = OutputConfig::default();
         let sarif = format_sarif(&report, &config).expect("format");

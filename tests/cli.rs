@@ -55,3 +55,23 @@ fn scan_sarif_format_valid() {
         .success()
         .stdout(predicate::str::contains("sarif-schema"));
 }
+
+#[test]
+fn suggest_flag_produces_output() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", "--suggest", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Suggested abstraction"));
+}
+
+#[test]
+fn suggest_flag_json_includes_suggestions() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", "--suggest", "--format", "json", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("suggestions"));
+}

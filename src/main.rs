@@ -36,6 +36,10 @@ enum Commands {
         /// Config file directory (looks for biston.toml or pyproject.toml)
         #[arg(long)]
         config: Option<PathBuf>,
+
+        /// Generate abstraction suggestions for similar pairs
+        #[arg(long)]
+        suggest: bool,
     },
 }
 
@@ -50,7 +54,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { path, format, min_lines, threshold, config: config_dir } => {
+        Commands::Scan { path, format, min_lines, threshold, config: config_dir, suggest } => {
             // Load config from directory (or scan path)
             let config_path = config_dir.as_deref().unwrap_or(&path);
             let mut config = Config::load(config_path).context("failed to load config")?;
@@ -64,6 +68,9 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(th) = threshold {
                 config.scan.threshold = th;
+            }
+            if suggest {
+                config.suggest.enabled = true;
             }
 
             let report = biston::scan(&path, &config)?;

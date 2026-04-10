@@ -182,20 +182,24 @@ pub fn score_template(
 /// For shared nodes with byte ranges, extracts the corresponding source text
 /// from the left function's source. For holes, emits `$HOLE_NAME` with a
 /// classification-based descriptor.
-pub fn render_template(template: &TemplateNode, left_source: &str) -> String {
+/// `source_offset` is the byte offset of the function in its file — byte ranges
+/// in `NormalizedNode` are file-relative, so we subtract this to index into `left_source`.
+pub fn render_template(template: &TemplateNode, left_source: &str, source_offset: usize) -> String {
     let mut out = String::new();
-    render_node(template, left_source, &mut out);
+    render_node(template, left_source, source_offset, &mut out);
     out
 }
 
-fn render_node(node: &TemplateNode, source: &str, out: &mut String) {
+fn render_node(node: &TemplateNode, source: &str, offset: usize, out: &mut String) {
     match node {
         TemplateNode::Shared { text, children, byte_range, .. } => {
             if children.is_empty() {
                 // Leaf node: use byte_range to extract original source, fall back to text
                 if let Some(range) = byte_range {
-                    if range.start < source.len() && range.end <= source.len() {
-                        out.push_str(&source[range.start..range.end]);
+                    let start = range.start.saturating_sub(offset);
+                    let end = range.end.saturating_sub(offset);
+                    if start < source.len() && end <= source.len() && start < end {
+                        out.push_str(&source[start..end]);
                         return;
                     }
                 }
@@ -204,22 +208,23 @@ fn render_node(node: &TemplateNode, source: &str, out: &mut String) {
                 }
             } else {
                 // Internal node: if it has a byte_range, use the source directly
-                // (this captures the full original text including whitespace/punctuation)
                 if let Some(range) = byte_range {
-                    if range.start < source.len() && range.end <= source.len() {
+                    let start = range.start.saturating_sub(offset);
+                    let end = range.end.saturating_sub(offset);
+                    if start < source.len() && end <= source.len() && start < end {
                         // Check if any children are holes — if so, we need to splice
                         let has_holes =
                             children.iter().any(|c| matches!(c, TemplateNode::Hole { .. }));
                         if !has_holes {
                             // All children are shared — use the original source verbatim
-                            out.push_str(&source[range.start..range.end]);
+                            out.push_str(&source[start..end]);
                             return;
                         }
                     }
                 }
                 // Has holes — render children individually
                 for child in children {
-                    render_node(child, source, out);
+                    render_node(child, source, offset, out);
                 }
             }
         }
@@ -666,7 +671,7 @@ mod tests {
         let right = leaf("identifier", "bar");
         let template = anti_unify(&left, &right);
 
-        let rendered = render_template(&template, "foo");
+        let rendered = render_template(&template, "foo", 0);
         assert!(rendered.contains("$HOLE_0"));
         assert!(rendered.contains("left: foo"));
         assert!(rendered.contains("right: bar"));
@@ -678,7 +683,7 @@ mod tests {
         let node = leaf("identifier", "hello");
         let template = anti_unify(&node, &node);
 
-        let rendered = render_template(&template, "irrelevant");
+        let rendered = render_template(&template, "irrelevant", 0);
         // No byte_range on hand-built nodes, so falls back to text
         assert_eq!(rendered, "hello");
     }
@@ -695,7 +700,7 @@ mod tests {
             right,
         };
 
-        let rendered = render_template(&template, "");
+        let rendered = render_template(&template, "", 0);
         assert!(rendered.contains("pass  # $HOLE_0"));
     }
 
@@ -708,7 +713,7 @@ mod tests {
             right: MISSING_NODE,
         };
 
-        let rendered = render_template(&template, "");
+        let rendered = render_template(&template, "", 0);
         assert!(rendered.contains("# [optional] $HOLE_0"));
         assert!(rendered.contains("left: x"));
         assert!(rendered.contains("right: <absent>"));
@@ -732,7 +737,7 @@ mod tests {
         };
         let template = anti_unify(&left, &right);
 
-        let rendered = render_template(&template, source);
+        let rendered = render_template(&template, source, 0);
         // Should use the original source "x", not the normalized "$0"
         assert_eq!(rendered, "x");
     }

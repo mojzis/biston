@@ -13,6 +13,12 @@ fn config_for_file(filename: &str) -> Config {
     config
 }
 
+fn config_for_file_with_suggest(filename: &str) -> Config {
+    let mut config = config_for_file(filename);
+    config.suggest.enabled = true;
+    config
+}
+
 #[test]
 fn detects_simple_clones() {
     let config = config_for_file("simple_clones.py");
@@ -76,4 +82,32 @@ fn normalized_trees_parallel_to_functions() {
         report.functions.len(),
         "normalized vec must be parallel to functions vec"
     );
+}
+
+#[test]
+fn suggest_produces_suggestions_for_clones() {
+    let config = config_for_file_with_suggest("suggest_clones.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(
+        !report.suggestions.is_empty(),
+        "expected at least one suggestion for suggest_clones.py"
+    );
+    // Verify quality fields are populated
+    let sug = &report.suggestions[0];
+    assert!(sug.quality.score > 0.0, "quality score should be positive");
+    assert!(sug.rendered.is_some(), "rendered template should be present");
+}
+
+#[test]
+fn suggest_disabled_produces_no_suggestions() {
+    let config = config_for_file("suggest_clones.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(report.suggestions.is_empty(), "expected no suggestions when suggest is disabled");
+}
+
+#[test]
+fn suggest_on_simple_clones_produces_suggestions() {
+    let config = config_for_file_with_suggest("simple_clones.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(!report.suggestions.is_empty(), "simple_clones.py should produce suggestions");
 }

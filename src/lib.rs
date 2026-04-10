@@ -16,7 +16,7 @@ use crate::config::Config;
 use crate::extract::FunctionFragment;
 use crate::hash::HashedFunction;
 use crate::normalize::NormalizedNode;
-use crate::report::CloneReport;
+use crate::report::{CloneReport, Suggestion};
 
 /// Result of processing a single function within a file scope.
 struct ProcessedFunction {
@@ -30,7 +30,12 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     // 1. Discover files
     let files = discovery::discover_files(root, &config.scan)?;
     if files.is_empty() {
-        return Ok(CloneReport { functions: vec![], normalized: vec![], pairs: vec![] });
+        return Ok(CloneReport {
+            functions: vec![],
+            normalized: vec![],
+            pairs: vec![],
+            suggestions: vec![],
+        });
     }
 
     // 2. Per-file: parse, extract, normalize, hash (parallel across files)
@@ -93,7 +98,7 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     if processed.len() < 2 {
         let (functions, normalized): (Vec<_>, Vec<_>) =
             processed.into_iter().map(|p| (p.fragment, p.normalized)).unzip();
-        return Ok(CloneReport { functions, normalized, pairs: vec![] });
+        return Ok(CloneReport { functions, normalized, pairs: vec![], suggestions: vec![] });
     }
 
     // 4. Destructure into parallel vecs and find similar pairs
@@ -107,8 +112,37 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     }
     let pairs = similarity::find_similar_functions(&hashed, config.scan.threshold);
 
+    let suggestions = if config.suggest.enabled {
+        pairs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, pair)| {
+                let left_norm = &normalized[pair.left];
+                let right_norm = &normalized[pair.right];
+                let template = antiunify::anti_unify(left_norm, right_norm);
+                let quality =
+                    antiunify::score_template(&template, left_norm, right_norm, &config.suggest);
+                if quality.suppressed {
+                    return None;
+                }
+                let rendered = if config.suggest.render_python {
+                    Some(antiunify::render_template(
+                        &template,
+                        &functions[pair.left].source_text,
+                        functions[pair.left].byte_range.start,
+                    ))
+                } else {
+                    None
+                };
+                Some(Suggestion { pair_index: i, quality, rendered })
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
     debug_assert_eq!(functions.len(), normalized.len());
-    Ok(CloneReport { functions, normalized, pairs })
+    Ok(CloneReport { functions, normalized, pairs, suggestions })
 }
 
 /// Find the first `function_definition` node in a tree (DFS).

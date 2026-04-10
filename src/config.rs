@@ -15,6 +15,8 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SuggestConfig {
+    /// Whether suggestion generation is enabled.
+    pub enabled: bool,
     /// Minimum template coverage score to suggest (0.0 - 1.0).
     pub min_quality: f64,
     /// Maximum number of holes before suppressing.
@@ -25,7 +27,7 @@ pub struct SuggestConfig {
 
 impl Default for SuggestConfig {
     fn default() -> Self {
-        Self { min_quality: 0.6, max_holes: 5, render_python: true }
+        Self { enabled: false, min_quality: 0.6, max_holes: 5, render_python: true }
     }
 }
 
