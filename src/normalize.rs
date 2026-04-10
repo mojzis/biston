@@ -230,7 +230,7 @@ fn is_docstring(node: tree_sitter::Node<'_>) -> bool {
 }
 
 /// Check if a node kind is a literal.
-fn is_literal_kind(kind: &str) -> bool {
+pub(crate) fn is_literal_kind(kind: &str) -> bool {
     matches!(
         kind,
         "integer" | "float" | "string" | "true" | "false" | "none" | "concatenated_string"

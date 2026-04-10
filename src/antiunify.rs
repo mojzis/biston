@@ -1,4 +1,4 @@
-use crate::normalize::NormalizedNode;
+use crate::normalize::{is_literal_kind, NormalizedNode};
 
 /// Sentinel node representing an absent child (one side has a child, the other doesn't).
 pub const MISSING_NODE: NormalizedNode =
@@ -59,13 +59,6 @@ pub fn classify_hole(left: &NormalizedNode, right: &NormalizedNode) -> HoleKind 
 
     // Default: Expression.
     HoleKind::Expression
-}
-
-fn is_literal_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "integer" | "float" | "string" | "true" | "false" | "none" | "concatenated_string"
-    )
 }
 
 fn is_statement_kind(kind: &str) -> bool {
