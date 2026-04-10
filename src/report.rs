@@ -22,6 +22,8 @@ pub struct Suggestion {
 
 /// The full clone detection report.
 pub struct CloneReport {
+    /// Number of files scanned by the discovery phase.
+    pub files_scanned: usize,
     pub functions: Vec<FunctionFragment>,
     /// Normalized AST for each function (parallel to `functions`).
     pub normalized: Vec<NormalizedNode>,
@@ -451,6 +453,7 @@ mod tests {
     #[test]
     fn text_format_single_cluster() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -470,6 +473,7 @@ mod tests {
     #[test]
     fn text_format_no_clones() {
         let report = CloneReport {
+            files_scanned: 0,
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
@@ -483,6 +487,7 @@ mod tests {
     #[test]
     fn text_format_respects_max_results() {
         let report = CloneReport {
+            files_scanned: 4,
             functions: vec![
                 make_func("a", "a.py", 0, 10),
                 make_func("b", "b.py", 0, 10),
@@ -504,6 +509,7 @@ mod tests {
     #[test]
     fn json_format_valid_json() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -521,6 +527,7 @@ mod tests {
     #[test]
     fn json_format_contains_expected_fields() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -545,6 +552,7 @@ mod tests {
     #[test]
     fn sarif_format_valid_json() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -561,6 +569,7 @@ mod tests {
     #[test]
     fn sarif_format_has_required_fields() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
