@@ -518,6 +518,7 @@ mod tests {
     #[test]
     fn text_format_color_header_contains_ansi() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -536,6 +537,7 @@ mod tests {
     #[test]
     fn text_format_color_function_names_highlighted() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -555,6 +557,7 @@ mod tests {
     #[test]
     fn text_format_no_color_no_ansi() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
