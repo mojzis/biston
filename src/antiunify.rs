@@ -26,7 +26,13 @@ pub enum HoleKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateNode {
     /// Shared structure — same in both inputs.
-    Shared { kind: &'static str, text: Option<String>, children: Vec<Self> },
+    Shared {
+        kind: &'static str,
+        text: Option<String>,
+        children: Vec<Self>,
+        /// Byte range from the left input's source (for rendering).
+        byte_range: Option<std::ops::Range<usize>>,
+    },
     /// Divergence point — different in the two inputs.
     Hole { name: String, left: NormalizedNode, right: NormalizedNode, classification: HoleKind },
 }
@@ -171,6 +177,87 @@ pub fn score_template(
     TemplateQuality { score, hole_count, max_hole_fraction, suppressed, reason }
 }
 
+/// Render a template as Python-like source text.
+///
+/// For shared nodes with byte ranges, extracts the corresponding source text
+/// from the left function's source. For holes, emits `$HOLE_NAME` with a
+/// classification-based descriptor.
+pub fn render_template(template: &TemplateNode, left_source: &str) -> String {
+    let mut out = String::new();
+    render_node(template, left_source, &mut out);
+    out
+}
+
+fn render_node(node: &TemplateNode, source: &str, out: &mut String) {
+    match node {
+        TemplateNode::Shared { text, children, byte_range, .. } => {
+            if children.is_empty() {
+                // Leaf node: use byte_range to extract original source, fall back to text
+                if let Some(range) = byte_range {
+                    if range.start < source.len() && range.end <= source.len() {
+                        out.push_str(&source[range.start..range.end]);
+                        return;
+                    }
+                }
+                if let Some(t) = text {
+                    out.push_str(t);
+                }
+            } else {
+                // Internal node: if it has a byte_range, use the source directly
+                // (this captures the full original text including whitespace/punctuation)
+                if let Some(range) = byte_range {
+                    if range.start < source.len() && range.end <= source.len() {
+                        // Check if any children are holes — if so, we need to splice
+                        let has_holes =
+                            children.iter().any(|c| matches!(c, TemplateNode::Hole { .. }));
+                        if !has_holes {
+                            // All children are shared — use the original source verbatim
+                            out.push_str(&source[range.start..range.end]);
+                            return;
+                        }
+                    }
+                }
+                // Has holes — render children individually
+                for child in children {
+                    render_node(child, source, out);
+                }
+            }
+        }
+        TemplateNode::Hole { name, classification, left, right, .. } => {
+            let desc = hole_descriptor(name, *classification);
+            out.push_str(&desc);
+            // Add inline comment showing what each side had
+            let left_text = node_summary(left);
+            let right_text = node_summary(right);
+            if left_text != right_text {
+                use std::fmt::Write;
+                let _ = write!(out, "  # left: {left_text}, right: {right_text}");
+            }
+        }
+    }
+}
+
+fn hole_descriptor(name: &str, classification: HoleKind) -> String {
+    match classification {
+        HoleKind::Identifier | HoleKind::Literal | HoleKind::Expression | HoleKind::MethodCall => {
+            name.to_owned()
+        }
+        HoleKind::StatementBlock => format!("pass  # {name}"),
+        HoleKind::OptionalBlock => format!("# [optional] {name}"),
+    }
+}
+
+/// Produce a short summary of a `NormalizedNode` for inline comments.
+fn node_summary(node: &NormalizedNode) -> String {
+    if let Some(ref text) = node.text {
+        text.clone()
+    } else if node.kind == "<missing>" {
+        "<absent>".to_owned()
+    } else {
+        format!("<{}>", node.kind)
+    }
+}
+
 /// Anti-unify two `NormalizedNode` trees, producing a `TemplateNode` template.
 ///
 /// Walks both trees in parallel. Where nodes match in kind and text, a `Shared`
@@ -220,7 +307,12 @@ fn anti_unify_recursive(
         children.push(make_hole(&MISSING_NODE, child, hole_counter));
     }
 
-    TemplateNode::Shared { kind: left.kind, text: left.text.clone(), children }
+    TemplateNode::Shared {
+        kind: left.kind,
+        text: left.text.clone(),
+        children,
+        byte_range: left.byte_range.clone(),
+    }
 }
 
 fn make_hole(
@@ -457,7 +549,12 @@ mod tests {
             kind: "block",
             text: None,
             children: vec![
-                TemplateNode::Shared { kind: "return", text: None, children: vec![] },
+                TemplateNode::Shared {
+                    kind: "return",
+                    text: None,
+                    children: vec![],
+                    byte_range: None,
+                },
                 TemplateNode::Hole {
                     name: "$HOLE_0".to_owned(),
                     classification: HoleKind::Identifier,
@@ -465,6 +562,7 @@ mod tests {
                     right: leaf("identifier", "b"),
                 },
             ],
+            byte_range: None,
         };
         assert_eq!(template.count_shared(), 2);
         assert_eq!(template.count_holes(), 1);
@@ -557,5 +655,85 @@ mod tests {
         assert!(quality.score < 0.6);
         assert!(quality.suppressed);
         assert!(quality.reason.as_ref().unwrap().contains("quality score"));
+    }
+
+    // --- Rendering tests ---
+
+    #[test]
+    fn render_hole_shows_name_and_sides() {
+        // A simple tree with one identifier hole
+        let left = leaf("identifier", "foo");
+        let right = leaf("identifier", "bar");
+        let template = anti_unify(&left, &right);
+
+        let rendered = render_template(&template, "foo");
+        assert!(rendered.contains("$HOLE_0"));
+        assert!(rendered.contains("left: foo"));
+        assert!(rendered.contains("right: bar"));
+    }
+
+    #[test]
+    fn render_shared_leaf_uses_text_fallback() {
+        // Two identical nodes → all shared, should render the text
+        let node = leaf("identifier", "hello");
+        let template = anti_unify(&node, &node);
+
+        let rendered = render_template(&template, "irrelevant");
+        // No byte_range on hand-built nodes, so falls back to text
+        assert_eq!(rendered, "hello");
+    }
+
+    #[test]
+    fn render_statement_block_hole() {
+        let left = make_node("block", None, vec![leaf("identifier", "x")]);
+        let right = make_node("block", None, vec![leaf("identifier", "y")]);
+        // Manually create as block-level hole to test rendering
+        let template = TemplateNode::Hole {
+            name: "$HOLE_0".to_owned(),
+            classification: HoleKind::StatementBlock,
+            left,
+            right,
+        };
+
+        let rendered = render_template(&template, "");
+        assert!(rendered.contains("pass  # $HOLE_0"));
+    }
+
+    #[test]
+    fn render_optional_block_hole() {
+        let template = TemplateNode::Hole {
+            name: "$HOLE_0".to_owned(),
+            classification: HoleKind::OptionalBlock,
+            left: leaf("identifier", "x"),
+            right: MISSING_NODE,
+        };
+
+        let rendered = render_template(&template, "");
+        assert!(rendered.contains("# [optional] $HOLE_0"));
+        assert!(rendered.contains("left: x"));
+        assert!(rendered.contains("right: <absent>"));
+    }
+
+    #[test]
+    fn render_with_byte_range_uses_original_source() {
+        let source = "def foo(x):\n    return x + 1\n";
+        // Create nodes with byte ranges pointing into the source
+        let left = NormalizedNode {
+            kind: "identifier",
+            text: Some("$0".to_owned()), // normalized
+            children: vec![],
+            byte_range: Some(8..9), // "x" in the source
+        };
+        let right = NormalizedNode {
+            kind: "identifier",
+            text: Some("$0".to_owned()),
+            children: vec![],
+            byte_range: Some(8..9),
+        };
+        let template = anti_unify(&left, &right);
+
+        let rendered = render_template(&template, source);
+        // Should use the original source "x", not the normalized "$0"
+        assert_eq!(rendered, "x");
     }
 }
