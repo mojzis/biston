@@ -51,20 +51,13 @@ pub fn function_has_ignore_comment(
     false
 }
 
-/// Check if text contains `# biston: ignore` but NOT as part of `# biston: ignore-file`.
+/// Check if any line in `text` starts (ignoring leading whitespace) with `# biston: ignore`
+/// but NOT `# biston: ignore-file`.
 fn has_ignore_not_ignore_file(text: &str) -> bool {
-    let marker = "# biston: ignore";
-    let mut start = 0;
-    while let Some(pos) = text[start..].find(marker) {
-        let abs_pos = start + pos;
-        let after = abs_pos + marker.len();
-        // Check that this is NOT followed by "-file"
-        if !text[after..].starts_with("-file") {
-            return true;
-        }
-        start = after;
-    }
-    false
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("# biston: ignore") && !trimmed.starts_with("# biston: ignore-file")
+    })
 }
 
 #[cfg(test)]
@@ -167,5 +160,12 @@ mod tests {
         let fn_start = 22;
         let source_text = "def foo():\n    pass\n";
         assert!(!function_has_ignore_comment(source_text, full_source, fn_start));
+    }
+
+    #[test]
+    fn ignore_in_string_literal_not_treated_as_comment() {
+        let source_text = "def foo():\n    msg = \"# biston: ignore\"\n    pass\n";
+        let full_source = source_text.as_bytes();
+        assert!(!function_has_ignore_comment(source_text, full_source, 0));
     }
 }

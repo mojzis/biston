@@ -239,13 +239,18 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
 }
 
 fn append_suppression_line(stats: &SuppressionStats, output: &mut String) {
-    let total = stats.config_files + stats.file_comments + stats.inline_functions;
-    if total > 0 {
-        let _ = writeln!(
-            output,
-            "Suppressed: {} functions ({} by config, {} by file comment, {} by inline comment)",
-            total, stats.config_files, stats.file_comments, stats.inline_functions
-        );
+    let mut parts = Vec::new();
+    if stats.config_files > 0 {
+        parts.push(format!("{} file(s) by config", stats.config_files));
+    }
+    if stats.file_comments > 0 {
+        parts.push(format!("{} file(s) by file comment", stats.file_comments));
+    }
+    if stats.inline_functions > 0 {
+        parts.push(format!("{} function(s) by inline comment", stats.inline_functions));
+    }
+    if !parts.is_empty() {
+        let _ = writeln!(output, "Suppressed: {}", parts.join(", "));
     }
 }
 
@@ -639,5 +644,62 @@ mod tests {
         assert_eq!(parsed["version"], "2.1.0");
         assert!(parsed["runs"].is_array());
         assert!(parsed["runs"][0]["results"].is_array());
+    }
+
+    // --- Suppression stats output tests ---
+
+    fn nonzero_suppression_stats() -> SuppressionStats {
+        SuppressionStats { config_files: 2, file_comments: 1, inline_functions: 3 }
+    }
+
+    #[test]
+    fn text_format_includes_suppression_stats() {
+        let report = CloneReport {
+            functions: vec![],
+            normalized: vec![],
+            pairs: vec![],
+            suggestions: vec![],
+            suppression_stats: nonzero_suppression_stats(),
+        };
+        let config = OutputConfig::default();
+        let text = format_text(&report, &config);
+        assert!(text.contains("2 file(s) by config"));
+        assert!(text.contains("1 file(s) by file comment"));
+        assert!(text.contains("3 function(s) by inline comment"));
+    }
+
+    #[test]
+    fn json_format_includes_suppression_stats() {
+        let report = CloneReport {
+            functions: vec![],
+            normalized: vec![],
+            pairs: vec![],
+            suggestions: vec![],
+            suppression_stats: nonzero_suppression_stats(),
+        };
+        let config = OutputConfig::default();
+        let json = format_json(&report, &config).expect("format");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["suppressed"]["config_files"], 2);
+        assert_eq!(parsed["suppressed"]["file_comments"], 1);
+        assert_eq!(parsed["suppressed"]["inline_functions"], 3);
+    }
+
+    #[test]
+    fn sarif_format_includes_suppression_stats() {
+        let report = CloneReport {
+            functions: vec![],
+            normalized: vec![],
+            pairs: vec![],
+            suggestions: vec![],
+            suppression_stats: nonzero_suppression_stats(),
+        };
+        let config = OutputConfig::default();
+        let sarif = format_sarif(&report, &config).expect("format");
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("valid json");
+        let suppression = &parsed["runs"][0]["properties"]["suppression"];
+        assert_eq!(suppression["config_files"], 2);
+        assert_eq!(suppression["file_comments"], 1);
+        assert_eq!(suppression["inline_functions"], 3);
     }
 }

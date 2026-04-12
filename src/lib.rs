@@ -22,6 +22,31 @@ use crate::normalize::NormalizedNode;
 use crate::report::{CloneReport, Suggestion};
 use crate::suppress::SuppressionStats;
 
+/// Atomic counters for tracking suppressions across parallel file processing.
+struct AtomicSuppressionStats {
+    config_files: AtomicUsize,
+    file_comments: AtomicUsize,
+    inline_functions: AtomicUsize,
+}
+
+impl AtomicSuppressionStats {
+    fn new() -> Self {
+        Self {
+            config_files: AtomicUsize::new(0),
+            file_comments: AtomicUsize::new(0),
+            inline_functions: AtomicUsize::new(0),
+        }
+    }
+
+    fn to_stats(&self) -> SuppressionStats {
+        SuppressionStats {
+            config_files: self.config_files.load(Ordering::Relaxed),
+            file_comments: self.file_comments.load(Ordering::Relaxed),
+            inline_functions: self.inline_functions.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Result of processing a single function within a file scope.
 struct ProcessedFunction {
     fragment: FunctionFragment,
@@ -44,24 +69,13 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     }
 
     // Suppression counters (atomic for par_iter)
-    let suppressed_config_files = AtomicUsize::new(0);
-    let suppressed_file_comments = AtomicUsize::new(0);
-    let suppressed_inline = AtomicUsize::new(0);
+    let suppression_counters = AtomicSuppressionStats::new();
 
     // 2. Per-file: parse, extract, normalize, hash (parallel across files)
     //    The Tree stays alive while we normalize, eliminating re-parsing.
     let mut processed: Vec<ProcessedFunction> = files
         .par_iter()
-        .flat_map(|path| {
-            process_file(
-                path,
-                root,
-                config,
-                &suppressed_config_files,
-                &suppressed_file_comments,
-                &suppressed_inline,
-            )
-        })
+        .flat_map(|path| process_file(path, root, config, &suppression_counters))
         .collect();
 
     // 3. Sort for determinism (parallel processing may reorder)
@@ -77,11 +91,7 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
         p.hashed.fragment_index = i;
     }
 
-    let suppression_stats = SuppressionStats {
-        config_files: suppressed_config_files.load(Ordering::Relaxed),
-        file_comments: suppressed_file_comments.load(Ordering::Relaxed),
-        inline_functions: suppressed_inline.load(Ordering::Relaxed),
-    };
+    let suppression_stats = suppression_counters.to_stats();
 
     if processed.len() < 2 {
         let (functions, normalized): (Vec<_>, Vec<_>) =
@@ -117,13 +127,11 @@ fn process_file(
     path: &Path,
     root: &Path,
     config: &Config,
-    suppressed_config_files: &AtomicUsize,
-    suppressed_file_comments: &AtomicUsize,
-    suppressed_inline: &AtomicUsize,
+    counters: &AtomicSuppressionStats,
 ) -> Vec<ProcessedFunction> {
     // Check config glob suppression before parsing
     if suppress::file_suppressed_by_config(path, root, &config.suppress) {
-        suppressed_config_files.fetch_add(1, Ordering::Relaxed);
+        counters.config_files.fetch_add(1, Ordering::Relaxed);
         return vec![];
     }
 
@@ -137,7 +145,7 @@ fn process_file(
 
     // Check file-level ignore comment
     if suppress::file_has_ignore_file_comment(&parsed.source) {
-        suppressed_file_comments.fetch_add(1, Ordering::Relaxed);
+        counters.file_comments.fetch_add(1, Ordering::Relaxed);
         return vec![];
     }
 
@@ -152,7 +160,7 @@ fn process_file(
                 &parsed.source,
                 frag.byte_range.start,
             ) {
-                suppressed_inline.fetch_add(1, Ordering::Relaxed);
+                counters.inline_functions.fetch_add(1, Ordering::Relaxed);
                 false
             } else {
                 true
