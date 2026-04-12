@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::config::OutputConfig;
 use crate::report::CloneReport;
+use crate::similarity::SimilarPair;
 
 const BOLD: &str = "\x1b[1m";
 const RED: &str = "\x1b[31m";
@@ -34,14 +35,19 @@ pub struct FileOverview {
     pub clone_count: usize,
 }
 
-/// Compute a file-centric overview from a clone report.
-pub fn compute_overview(report: &CloneReport) -> Vec<FileOverview> {
-    // Build a map: func_index -> Vec<(partner_index, similarity)>
+/// Build a bidirectional map from function index to clone partners.
+fn build_clone_map(pairs: &[SimilarPair]) -> FxHashMap<usize, Vec<(usize, f64)>> {
     let mut clone_map: FxHashMap<usize, Vec<(usize, f64)>> = FxHashMap::default();
-    for pair in &report.pairs {
+    for pair in pairs {
         clone_map.entry(pair.left).or_default().push((pair.right, pair.similarity));
         clone_map.entry(pair.right).or_default().push((pair.left, pair.similarity));
     }
+    clone_map
+}
+
+/// Compute a file-centric overview from a clone report.
+pub fn compute_overview(report: &CloneReport) -> Vec<FileOverview> {
+    let clone_map = build_clone_map(&report.pairs);
 
     // Group functions by file_path
     let mut file_groups: FxHashMap<PathBuf, Vec<usize>> = FxHashMap::default();
@@ -56,7 +62,6 @@ pub fn compute_overview(report: &CloneReport) -> Vec<FileOverview> {
             // Sort by start_line within each file
             indices.sort_by_key(|&idx| report.functions[idx].start_line);
 
-            let mut clone_count = 0;
             let functions: Vec<FunctionEntry> = indices
                 .into_iter()
                 .map(|idx| {
@@ -66,22 +71,20 @@ pub fn compute_overview(report: &CloneReport) -> Vec<FileOverview> {
                             .max_by(|a, b| {
                                 a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
                             })
-                            .map(|&(partner_idx, similarity)| {
-                                clone_count += 1;
-                                CloneAnnotation {
-                                    similarity,
-                                    partner_name: report.functions[partner_idx].name.clone(),
-                                    partner_file: report.functions[partner_idx]
-                                        .file_path
-                                        .display()
-                                        .to_string(),
-                                }
+                            .map(|&(partner_idx, similarity)| CloneAnnotation {
+                                similarity,
+                                partner_name: report.functions[partner_idx].name.clone(),
+                                partner_file: report.functions[partner_idx]
+                                    .file_path
+                                    .display()
+                                    .to_string(),
                             })
                     });
                     FunctionEntry { func_index: idx, best_clone }
                 })
                 .collect();
 
+            let clone_count = functions.iter().filter(|e| e.best_clone.is_some()).count();
             FileOverview { file_path, functions, clone_count }
         })
         .collect();
@@ -197,12 +200,7 @@ pub fn format_overview_json(
     overviews: &[FileOverview],
     report: &CloneReport,
 ) -> anyhow::Result<String> {
-    // Build a map: func_index -> Vec<(partner_index, similarity)> for all partners
-    let mut clone_map: FxHashMap<usize, Vec<(usize, f64)>> = FxHashMap::default();
-    for pair in &report.pairs {
-        clone_map.entry(pair.left).or_default().push((pair.right, pair.similarity));
-        clone_map.entry(pair.right).or_default().push((pair.left, pair.similarity));
-    }
+    let clone_map = build_clone_map(&report.pairs);
 
     let total_functions: usize = overviews.iter().map(|f| f.functions.len()).sum();
 
