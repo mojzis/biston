@@ -5,6 +5,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 
 use biston::config::{Config, OutputFormat};
+use biston::overview;
 use biston::report;
 use biston::stats;
 
@@ -117,6 +118,12 @@ enum Commands {
         suggest: bool,
     },
 
+    /// Show a condensed file-centric overview of clone detection results
+    Overview {
+        #[command(flatten)]
+        common: CommonOpts,
+    },
+
     /// Show statistics about scan findings
     Stats {
         #[command(flatten)]
@@ -176,6 +183,28 @@ fn main() -> anyhow::Result<()> {
                 OutputFormat::Text => report::format_text(&report, &config.output),
                 OutputFormat::Json => report::format_json(&report, &config.output)?,
                 OutputFormat::Sarif => report::format_sarif(&report, &config.output)?,
+            };
+
+            print!("{output}");
+
+            Ok(())
+        }
+        Commands::Overview { common } => {
+            let mut config = common.resolve()?;
+
+            if config.output.format == OutputFormat::Text && std::io::stdout().is_terminal() {
+                config.output.color = true;
+            }
+
+            let focus_files = common.focus_files()?;
+            let report = biston::scan_focused(&common.path, &config, focus_files.as_deref())?;
+            let overviews = overview::compute_overview(&report);
+
+            let output = match config.output.format {
+                OutputFormat::Json => overview::format_overview_json(&overviews, &report)?,
+                OutputFormat::Text | OutputFormat::Sarif => {
+                    overview::format_overview_text(&overviews, &report, &config.output)
+                }
             };
 
             print!("{output}");

@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod extract;
 pub mod hash;
 pub mod normalize;
+pub mod overview;
 pub mod parse;
 pub mod report;
 pub mod similarity;
