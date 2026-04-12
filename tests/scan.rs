@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use biston::config::Config;
+use biston::config::{Config, SuppressConfig};
 
 fn fixtures_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -110,4 +110,43 @@ fn suggest_on_simple_clones_produces_suggestions() {
     let config = config_for_file_with_suggest("simple_clones.py");
     let report = biston::scan(&fixtures_path(), &config).unwrap();
     assert!(!report.suggestions.is_empty(), "simple_clones.py should produce suggestions");
+}
+
+#[test]
+fn test_inline_suppress_excludes_function() {
+    let config = config_for_file("suppressed_inline.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert_eq!(
+        report.functions.len(),
+        1,
+        "expected 1 function after inline suppression, got {}",
+        report.functions.len()
+    );
+    assert!(report.pairs.is_empty(), "expected 0 pairs with only 1 function remaining");
+    assert_eq!(report.suppression_stats.inline_functions, 1);
+}
+
+#[test]
+fn test_file_level_suppress_excludes_all() {
+    let config = config_for_file("suppressed_file.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(
+        report.functions.is_empty(),
+        "expected 0 functions after file-level suppression, got {}",
+        report.functions.len()
+    );
+    assert_eq!(report.suppression_stats.file_comments, 1);
+}
+
+#[test]
+fn test_config_glob_suppress() {
+    let mut config = config_for_file("suppressed_inline.py");
+    config.suppress = SuppressConfig { files: vec!["suppressed_inline.py".to_owned()] };
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(
+        report.functions.is_empty(),
+        "expected 0 functions after config glob suppression, got {}",
+        report.functions.len()
+    );
+    assert_eq!(report.suppression_stats.config_files, 1);
 }

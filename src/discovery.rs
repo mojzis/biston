@@ -44,7 +44,7 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> anyhow::Result<Vec<Pa
 /// Check if a path matches any of the given glob patterns.
 ///
 /// Patterns are matched against the path relative to `root`.
-fn matches_any_glob(path: &Path, root: &Path, patterns: &[String]) -> bool {
+pub(crate) fn matches_any_glob(path: &Path, root: &Path, patterns: &[String]) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let relative_str = relative.to_string_lossy();
 

@@ -9,6 +9,7 @@ use crate::config::OutputConfig;
 use crate::extract::FunctionFragment;
 use crate::normalize::NormalizedNode;
 use crate::similarity::SimilarPair;
+use crate::suppress::SuppressionStats;
 
 /// A suggested abstraction for a pair of similar functions.
 pub struct Suggestion {
@@ -28,6 +29,8 @@ pub struct CloneReport {
     pub pairs: Vec<SimilarPair>,
     /// Suggested abstractions for clone pairs.
     pub suggestions: Vec<Suggestion>,
+    /// How many functions/files were suppressed.
+    pub suppression_stats: SuppressionStats,
 }
 
 /// A cluster of mutually similar functions.
@@ -161,6 +164,7 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
 
     if clusters.is_empty() {
         output.push_str("No clones detected.\n");
+        append_suppression_line(&report.suppression_stats, &mut output);
         return output;
     }
 
@@ -229,7 +233,20 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
         let _ = writeln!(output);
     }
 
+    append_suppression_line(&report.suppression_stats, &mut output);
+
     output
+}
+
+fn append_suppression_line(stats: &SuppressionStats, output: &mut String) {
+    let total = stats.config_files + stats.file_comments + stats.inline_functions;
+    if total > 0 {
+        let _ = writeln!(
+            output,
+            "Suppressed: {} functions ({} by config, {} by file comment, {} by inline comment)",
+            total, stats.config_files, stats.file_comments, stats.inline_functions
+        );
+    }
 }
 
 /// JSON output structures.
@@ -238,6 +255,21 @@ struct JsonReport {
     clusters: Vec<JsonCluster>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     suggestions: Vec<JsonSuggestion>,
+    #[serde(skip_serializing_if = "JsonSuppressed::is_zero")]
+    suppressed: JsonSuppressed,
+}
+
+#[derive(Serialize, Default)]
+struct JsonSuppressed {
+    config_files: usize,
+    file_comments: usize,
+    inline_functions: usize,
+}
+
+impl JsonSuppressed {
+    fn is_zero(&self) -> bool {
+        self.config_files == 0 && self.file_comments == 0 && self.inline_functions == 0
+    }
 }
 
 #[derive(Serialize)]
@@ -307,7 +339,15 @@ pub fn format_json(report: &CloneReport, config: &OutputConfig) -> anyhow::Resul
         })
         .collect();
 
-    let json_report = JsonReport { clusters: json_clusters, suggestions: json_suggestions };
+    let json_report = JsonReport {
+        clusters: json_clusters,
+        suggestions: json_suggestions,
+        suppressed: JsonSuppressed {
+            config_files: report.suppression_stats.config_files,
+            file_comments: report.suppression_stats.file_comments,
+            inline_functions: report.suppression_stats.inline_functions,
+        },
+    };
     serde_json::to_string_pretty(&json_report).context("failed to serialize JSON report")
 }
 
@@ -375,19 +415,34 @@ pub fn format_sarif(report: &CloneReport, _config: &OutputConfig) -> anyhow::Res
         })
         .collect();
 
+    let stats = &report.suppression_stats;
+    let total_suppressed = stats.config_files + stats.file_comments + stats.inline_functions;
+
+    let mut run = serde_json::json!({
+        "tool": {
+            "driver": {
+                "name": "biston",
+                "version": env!("CARGO_PKG_VERSION"),
+                "informationUri": "https://github.com/mojzis/biston"
+            }
+        },
+        "results": results
+    });
+
+    if total_suppressed > 0 {
+        run["properties"] = serde_json::json!({
+            "suppression": {
+                "config_files": stats.config_files,
+                "file_comments": stats.file_comments,
+                "inline_functions": stats.inline_functions
+            }
+        });
+    }
+
     let sarif = serde_json::json!({
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
         "version": "2.1.0",
-        "runs": [{
-            "tool": {
-                "driver": {
-                    "name": "biston",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "informationUri": "https://github.com/mojzis/biston"
-                }
-            },
-            "results": results
-        }]
+        "runs": [run]
     });
 
     serde_json::to_string_pretty(&sarif).context("failed to serialize SARIF report")
@@ -458,6 +513,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig { show_source: false, ..OutputConfig::default() };
         let text = format_text(&report, &config);
@@ -474,6 +530,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig::default();
         let text = format_text(&report, &config);
@@ -492,6 +549,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9), make_pair(2, 3, 0.8)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig { max_results: 1, show_source: false, ..OutputConfig::default() };
         let text = format_text(&report, &config);
@@ -511,6 +569,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig { show_source: false, ..OutputConfig::default() };
         let json = format_json(&report, &config).expect("format");
@@ -528,6 +587,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig { show_source: false, ..OutputConfig::default() };
         let json = format_json(&report, &config).expect("format");
@@ -552,6 +612,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig::default();
         let sarif = format_sarif(&report, &config).expect("format");
@@ -568,6 +629,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig::default();
         let sarif = format_sarif(&report, &config).expect("format");

@@ -10,6 +10,13 @@ pub struct Config {
     pub normalization: NormalizationConfig,
     pub output: OutputConfig,
     pub suggest: SuggestConfig,
+    pub suppress: SuppressConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SuppressConfig {
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -265,6 +272,26 @@ min_lines = 5
         assert!((config.suggest.min_quality - 0.6).abs() < f64::EPSILON);
         assert_eq!(config.suggest.max_holes, 5);
         assert!(config.suggest.render_python);
+    }
+
+    #[test]
+    fn suppress_section_parses_from_toml() {
+        let toml_str = r#"
+[suppress]
+files = ["generated/**", "vendor/**"]
+"#;
+        let config: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(config.suppress.files, vec!["generated/**", "vendor/**"]);
+    }
+
+    #[test]
+    fn suppress_defaults_when_absent() {
+        let toml_str = r"
+[scan]
+min_lines = 5
+";
+        let config: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(config.suppress.files.is_empty());
     }
 
     #[test]
