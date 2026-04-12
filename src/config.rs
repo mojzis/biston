@@ -74,6 +74,9 @@ pub struct OutputConfig {
     pub max_results: usize,
     pub show_source: bool,
     pub context_lines: usize,
+    /// Whether to emit ANSI color codes (set at runtime based on TTY detection).
+    #[serde(skip)]
+    pub color: bool,
 }
 
 impl Default for ScanConfig {
@@ -111,6 +114,7 @@ impl Default for OutputConfig {
             max_results: 50,
             show_source: true,
             context_lines: 3,
+            color: false,
         }
     }
 }

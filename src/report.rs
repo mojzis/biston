@@ -23,6 +23,8 @@ pub struct Suggestion {
 
 /// The full clone detection report.
 pub struct CloneReport {
+    /// Number of files scanned by the discovery phase.
+    pub files_scanned: usize,
     pub functions: Vec<FunctionFragment>,
     /// Normalized AST for each function (parallel to `functions`).
     pub normalized: Vec<NormalizedNode>,
@@ -157,10 +159,19 @@ fn cluster_suggestions<'a>(
         .collect()
 }
 
+// ANSI escape helpers — only used when `OutputConfig::color` is true.
+const BOLD: &str = "\x1b[1m";
+const CYAN: &str = "\x1b[36m";
+const YELLOW: &str = "\x1b[33m";
+const RESET: &str = "\x1b[0m";
+
 /// Format the report as human-readable text.
 pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
     let clusters = cluster_pairs(&report.pairs, report.functions.len());
     let mut output = String::new();
+
+    let (bold, cyan, yellow, reset) =
+        if config.color { (BOLD, CYAN, YELLOW, RESET) } else { ("", "", "", "") };
 
     if clusters.is_empty() {
         output.push_str("No clones detected.\n");
@@ -169,14 +180,14 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
     }
 
     let count = clusters.len().min(config.max_results);
-    let _ = writeln!(output, "Found {count} clone cluster(s):\n");
+    let _ = writeln!(output, "{bold}Found {count} clone cluster(s):{reset}\n");
 
     let sug_map = suggestion_map(&report.suggestions);
 
     for (i, cluster) in clusters.iter().take(config.max_results).enumerate() {
         let _ = writeln!(
             output,
-            "Clone cluster #{} (similarity: {:.2}, {} functions)",
+            "{bold}Clone cluster #{} (similarity: {:.2}, {} functions){reset}",
             i + 1,
             cluster.min_similarity,
             cluster.members.len()
@@ -186,7 +197,7 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
             let func = &report.functions[idx];
             let _ = writeln!(
                 output,
-                "  {}:{}-{}  {}",
+                "  {}:{}-{}  {cyan}{}{reset}",
                 func.file_path.display(),
                 func.start_line + 1, // 1-indexed for display
                 func.end_line + 1,
@@ -200,7 +211,7 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
                 let func = &report.functions[idx];
                 let _ = writeln!(
                     output,
-                    "  --- {} ({}:{}) ---",
+                    "  --- {cyan}{}{reset} ({}:{}) ---",
                     func.name,
                     func.file_path.display(),
                     func.start_line + 1
@@ -220,7 +231,7 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
         for sug in suggestions {
             let _ = writeln!(
                 output,
-                "  Suggested abstraction (quality: {:.2}, holes: {}):",
+                "  {yellow}Suggested abstraction (quality: {:.2}, holes: {}):{reset}",
                 sug.quality.score, sug.quality.hole_count
             );
             if let Some(ref rendered) = sug.rendered {
@@ -511,6 +522,7 @@ mod tests {
     #[test]
     fn text_format_single_cluster() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -531,6 +543,7 @@ mod tests {
     #[test]
     fn text_format_no_clones() {
         let report = CloneReport {
+            files_scanned: 0,
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
@@ -545,6 +558,7 @@ mod tests {
     #[test]
     fn text_format_respects_max_results() {
         let report = CloneReport {
+            files_scanned: 4,
             functions: vec![
                 make_func("a", "a.py", 0, 10),
                 make_func("b", "b.py", 0, 10),
@@ -562,11 +576,70 @@ mod tests {
         assert!(!text.contains("Clone cluster #2"));
     }
 
+    // --- Colored text formatter tests ---
+
+    #[test]
+    fn text_format_color_header_contains_ansi() {
+        let report = CloneReport {
+            files_scanned: 2,
+            functions: vec![
+                make_func("foo", "src/a.py", 0, 10),
+                make_func("bar", "src/b.py", 5, 15),
+            ],
+            normalized: vec![],
+            pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
+        };
+        let config = OutputConfig { color: true, show_source: false, ..OutputConfig::default() };
+        let text = format_text(&report, &config);
+        // Header should contain bold ANSI escape
+        assert!(text.contains("\x1b[1m"), "header should be bold");
+        assert!(text.contains("Found 1 clone cluster(s)"));
+    }
+
+    #[test]
+    fn text_format_color_function_names_highlighted() {
+        let report = CloneReport {
+            files_scanned: 2,
+            functions: vec![
+                make_func("foo", "src/a.py", 0, 10),
+                make_func("bar", "src/b.py", 5, 15),
+            ],
+            normalized: vec![],
+            pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
+        };
+        let config = OutputConfig { color: true, show_source: false, ..OutputConfig::default() };
+        let text = format_text(&report, &config);
+        // Function names should be cyan (\x1b[36m)
+        assert!(text.contains("\x1b[36m"), "function names should be cyan");
+        assert!(text.contains("foo"));
+        assert!(text.contains("bar"));
+    }
+
+    #[test]
+    fn text_format_no_color_no_ansi() {
+        let report = CloneReport {
+            files_scanned: 2,
+            functions: vec![
+                make_func("foo", "src/a.py", 0, 10),
+                make_func("bar", "src/b.py", 5, 15),
+            ],
+            normalized: vec![],
+            pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
+        };
+        let config = OutputConfig { color: false, show_source: false, ..OutputConfig::default() };
+        let text = format_text(&report, &config);
+        assert!(!text.contains("\x1b["), "no ANSI codes when color is off");
+    }
+
     // --- JSON formatter tests ---
 
     #[test]
     fn json_format_valid_json() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -585,6 +658,7 @@ mod tests {
     #[test]
     fn json_format_contains_expected_fields() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -610,6 +684,7 @@ mod tests {
     #[test]
     fn sarif_format_valid_json() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),
@@ -627,6 +702,7 @@ mod tests {
     #[test]
     fn sarif_format_has_required_fields() {
         let report = CloneReport {
+            files_scanned: 2,
             functions: vec![
                 make_func("foo", "src/a.py", 0, 10),
                 make_func("bar", "src/b.py", 5, 15),

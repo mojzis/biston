@@ -7,6 +7,7 @@ pub mod normalize;
 pub mod parse;
 pub mod report;
 pub mod similarity;
+pub mod stats;
 pub mod suppress;
 
 use std::path::Path;
@@ -58,8 +59,10 @@ struct ProcessedFunction {
 pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     // 1. Discover files
     let files = discovery::discover_files(root, &config.scan)?;
+    let files_scanned = files.len();
     if files.is_empty() {
         return Ok(CloneReport {
+            files_scanned: 0,
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
@@ -97,6 +100,7 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
         let (functions, normalized): (Vec<_>, Vec<_>) =
             processed.into_iter().map(|p| (p.fragment, p.normalized)).unzip();
         return Ok(CloneReport {
+            files_scanned,
             functions,
             normalized,
             pairs: vec![],
@@ -119,7 +123,7 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
     let suggestions = build_suggestions(config, &pairs, &normalized, &functions);
 
     debug_assert_eq!(functions.len(), normalized.len());
-    Ok(CloneReport { functions, normalized, pairs, suggestions, suppression_stats })
+    Ok(CloneReport { files_scanned, functions, normalized, pairs, suggestions, suppression_stats })
 }
 
 /// Process a single file: suppress, parse, extract, normalize, hash.
