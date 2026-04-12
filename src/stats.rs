@@ -149,6 +149,7 @@ mod tests {
     use super::*;
     use crate::extract::FunctionFragment;
     use crate::similarity::SimilarPair;
+    use crate::suppress::SuppressionStats;
 
     fn make_func(name: &str, file: &str, start: usize, end: usize) -> FunctionFragment {
         FunctionFragment {
@@ -173,6 +174,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         assert_eq!(stats.files_scanned, 0);
@@ -195,6 +197,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 1.0)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         assert_eq!(stats.files_scanned, 2);
@@ -229,6 +232,7 @@ mod tests {
                 make_pair(2, 3, 0.75), // similar
             ],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         assert_eq!(stats.functions_extracted, 4);
@@ -256,6 +260,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.85)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         assert_eq!(stats.files_with_clones, 1);
@@ -274,6 +279,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         assert_eq!(stats.functions_extracted, 3);
@@ -291,6 +297,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         let text = format_stats_text(&stats);
@@ -309,6 +316,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         let text = format_stats_text(&stats);
@@ -325,6 +333,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         let json = format_stats_json(&stats).expect("should serialize");
@@ -343,6 +352,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         let json = format_stats_json(&stats).expect("should serialize");
@@ -363,6 +373,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let stats = compute_stats(&report);
         let text = format_stats_text(&stats);

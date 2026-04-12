@@ -589,6 +589,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig { color: true, show_source: false, ..OutputConfig::default() };
         let text = format_text(&report, &config);
@@ -608,6 +609,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig { color: true, show_source: false, ..OutputConfig::default() };
         let text = format_text(&report, &config);
@@ -628,6 +630,7 @@ mod tests {
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
             suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
         };
         let config = OutputConfig { color: false, show_source: false, ..OutputConfig::default() };
         let text = format_text(&report, &config);
@@ -731,6 +734,7 @@ mod tests {
     #[test]
     fn text_format_includes_suppression_stats() {
         let report = CloneReport {
+            files_scanned: 0,
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
@@ -747,6 +751,7 @@ mod tests {
     #[test]
     fn json_format_includes_suppression_stats() {
         let report = CloneReport {
+            files_scanned: 0,
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
@@ -764,6 +769,7 @@ mod tests {
     #[test]
     fn sarif_format_includes_suppression_stats() {
         let report = CloneReport {
+            files_scanned: 0,
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
