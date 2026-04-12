@@ -26,7 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+cf/
 # Virtual environments
 .env
 .venv
@@ -35,6 +35,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Claude Code
+.claude/worktrees/
 
 # IDE
 .vscode/
