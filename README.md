@@ -7,7 +7,7 @@ It parses Python files with [tree-sitter](https://tree-sitter.github.io/tree-sit
 ## Install
 
 ```
-biston add
+uv add biston
 ```
 
 Or build from source:
