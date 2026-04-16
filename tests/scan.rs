@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use biston::config::{Config, SuppressConfig};
 
+mod common;
+
 fn fixtures_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
@@ -149,4 +151,79 @@ fn test_config_glob_suppress() {
         report.functions.len()
     );
     assert_eq!(report.suppression_stats.config_files, 1);
+}
+
+// --- Focus-file (commit-hook) scan tests ---
+
+#[test]
+fn scan_focused_without_focus_matches_scan() {
+    let dir = common::multi_file_dir();
+    let config = Config::default();
+    let focused = biston::scan_focused(dir.path(), &config, None).expect("scan_focused");
+    let full = biston::scan(dir.path(), &config).expect("scan");
+    assert_eq!(focused.functions.len(), full.functions.len());
+    assert_eq!(focused.pairs.len(), full.pairs.len());
+}
+
+#[test]
+fn scan_focused_restricts_pairs_to_focus_files() {
+    let dir = common::multi_file_dir();
+    let config = Config::default();
+
+    // Baseline: all four files produce both pairs.
+    let full = biston::scan(dir.path(), &config).expect("scan");
+    assert_eq!(full.pairs.len(), 2, "expected a-b and c-d pairs without focus");
+
+    // Focus on a.py only: a-b pair is kept (a is in focus), c-d is dropped.
+    let focus = vec![dir.path().join("a.py")];
+    let report = biston::scan_focused(dir.path(), &config, Some(&focus)).expect("scan_focused");
+
+    // Full repo is still processed so cross-file clones are still found.
+    assert_eq!(report.functions.len(), 4, "all functions still extracted");
+    assert_eq!(report.pairs.len(), 1, "only the a-b pair should be emitted");
+
+    let pair = &report.pairs[0];
+    let left = &report.functions[pair.left].file_path;
+    let right = &report.functions[pair.right].file_path;
+    let a = dir.path().join("a.py");
+    let b = dir.path().join("b.py");
+    assert!(
+        (left == &a && right == &b) || (left == &b && right == &a),
+        "pair should involve a.py and b.py, got {left:?} + {right:?}"
+    );
+}
+
+#[test]
+fn scan_focused_empty_focus_emits_no_pairs() {
+    // An explicitly empty focus set means "nothing changed" — no pairs should
+    // be emitted, but all files are still parsed so stats stay meaningful.
+    let dir = common::multi_file_dir();
+    let config = Config::default();
+    let focus: Vec<std::path::PathBuf> = vec![];
+    let report = biston::scan_focused(dir.path(), &config, Some(&focus)).expect("scan_focused");
+    assert_eq!(report.functions.len(), 4);
+    assert!(report.pairs.is_empty());
+}
+
+#[test]
+fn scan_focused_ignores_unknown_focus_path() {
+    // A mix of valid + invalid paths should resolve the valid ones and
+    // silently skip the invalid ones — not fail the whole scan.
+    let dir = common::multi_file_dir();
+    let config = Config::default();
+    let focus = vec![dir.path().join("does_not_exist.py"), dir.path().join("a.py")];
+    let report = biston::scan_focused(dir.path(), &config, Some(&focus)).expect("scan_focused");
+    assert_eq!(report.functions.len(), 4);
+    // The a.py focus path still resolves, so the a-b pair is emitted. The
+    // missing focus path shouldn't accidentally match anything.
+    assert_eq!(report.pairs.len(), 1, "valid focus path still matches");
+    let pair = &report.pairs[0];
+    let left = &report.functions[pair.left].file_path;
+    let right = &report.functions[pair.right].file_path;
+    let a = dir.path().join("a.py");
+    let b = dir.path().join("b.py");
+    assert!(
+        (left == &a && right == &b) || (left == &b && right == &a),
+        "pair should involve a.py and b.py, got {left:?} + {right:?}"
+    );
 }

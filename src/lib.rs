@@ -10,9 +10,10 @@ pub mod similarity;
 pub mod stats;
 pub mod suppress;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -57,6 +58,29 @@ struct ProcessedFunction {
 
 /// Run the full clone detection pipeline on a directory.
 pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
+    scan_focused(root, config, None)
+}
+
+/// Run the full clone detection pipeline, optionally restricted to pairs
+/// involving at least one file in `focus_files`.
+///
+/// When `focus_files` is `None`, all pairs are emitted (identical to [`scan`]).
+/// When `focus_files` is `Some(&[...])`, the repository is still scanned in
+/// full (so cross-file clones between a focus file and the rest of the repo
+/// are detected), but only pairs where at least one side lives in a focus
+/// file are returned. This is intended for commit hooks that want to flag
+/// clones introduced or touched by a changeset without re-analysing the
+/// whole repo against itself.
+///
+/// Focus paths are resolved by canonicalisation; paths that do not exist on
+/// disk are silently ignored (matching no files).
+pub fn scan_focused(
+    root: &Path,
+    config: &Config,
+    focus_files: Option<&[PathBuf]>,
+) -> anyhow::Result<CloneReport> {
+    let focus_set = focus_files.map(canonicalize_focus_set);
+
     // 1. Discover files
     let files = discovery::discover_files(root, &config.scan)?;
     let files_scanned = files.len();
@@ -118,12 +142,81 @@ pub fn scan(root: &Path, config: &Config) -> anyhow::Result<CloneReport> {
         normalized.push(p.normalized);
         hashed.push(p.hashed);
     }
-    let pairs = similarity::find_similar_functions(&hashed, config.scan.threshold);
+    let mut pairs = similarity::find_similar_functions(&hashed, config.scan.threshold);
+
+    // 5. If the caller supplied a focus set, drop pairs that don't involve
+    // any of the focus files. Full-repo processing above means cross-file
+    // clones between focus and non-focus files are still detected.
+    if let Some(focus) = focus_set.as_ref() {
+        let focus_indices = focus_fragment_indices(&functions, focus);
+        pairs = filter_pairs_by_focus(pairs, &focus_indices);
+    }
 
     let suggestions = build_suggestions(config, &pairs, &normalized, &functions);
 
     debug_assert_eq!(functions.len(), normalized.len());
     Ok(CloneReport { files_scanned, functions, normalized, pairs, suggestions, suppression_stats })
+}
+
+/// Canonicalise the caller-supplied focus paths into a set for O(1) lookup.
+///
+/// Non-existent paths are skipped (with a warning) rather than erroring — a
+/// commit hook that lists a just-deleted file shouldn't crash the whole scan.
+fn canonicalize_focus_set(paths: &[PathBuf]) -> FxHashSet<PathBuf> {
+    let mut set = FxHashSet::default();
+    for p in paths {
+        match std::fs::canonicalize(p) {
+            Ok(canon) => {
+                set.insert(canon);
+            }
+            Err(e) => {
+                tracing::warn!("focus file {} could not be canonicalised: {e}", p.display());
+            }
+        }
+    }
+    set
+}
+
+/// Pre-compute the set of fragment indices whose source file is in the focus
+/// set. We canonicalise each unique file path at most once so this is O(files)
+/// filesystem calls rather than O(fragments).
+fn focus_fragment_indices(
+    functions: &[FunctionFragment],
+    focus: &FxHashSet<PathBuf>,
+) -> FxHashSet<usize> {
+    if focus.is_empty() {
+        return FxHashSet::default();
+    }
+    // Cache: fragment file_path -> is-in-focus decision.
+    let mut cache: rustc_hash::FxHashMap<PathBuf, bool> = rustc_hash::FxHashMap::default();
+    let mut indices = FxHashSet::default();
+    for (i, fragment) in functions.iter().enumerate() {
+        let hit =
+            cache.entry(fragment.file_path.clone()).or_insert_with(|| match std::fs::canonicalize(
+                &fragment.file_path,
+            ) {
+                Ok(canon) => focus.contains(&canon),
+                Err(_) => false,
+            });
+        if *hit {
+            indices.insert(i);
+        }
+    }
+    indices
+}
+
+/// Keep only pairs where at least one side lives in a focus file.
+fn filter_pairs_by_focus(
+    pairs: Vec<crate::similarity::SimilarPair>,
+    focus_indices: &FxHashSet<usize>,
+) -> Vec<crate::similarity::SimilarPair> {
+    if focus_indices.is_empty() {
+        return vec![];
+    }
+    pairs
+        .into_iter()
+        .filter(|pair| focus_indices.contains(&pair.left) || focus_indices.contains(&pair.right))
+        .collect()
 }
 
 /// Process a single file: suppress, parse, extract, normalize, hash.
