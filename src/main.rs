@@ -2,7 +2,8 @@ use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 use biston::config::{Config, OutputFormat};
 use biston::overview;
@@ -10,10 +11,57 @@ use biston::report;
 use biston::stats;
 
 #[derive(Parser)]
-#[command(name = "biston", about = "Structural clone detector for Python")]
+#[command(name = "biston", about = "Structural clone detector for Python", version)]
 struct Cli {
+    /// Colorize output: `auto` honours `NO_COLOR` and TTY detection.
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto, global = true)]
+    color: ColorChoice,
+
+    /// Increase log verbosity: `-v` info, `-vv` debug, `-vvv` trace. `RUST_LOG` overrides.
+    #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true, conflicts_with = "quiet")]
+    verbose: u8,
+
+    /// Suppress warnings (only errors print). `RUST_LOG` overrides.
+    #[arg(short = 'q', long = "quiet", global = true)]
+    quiet: bool,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorChoice {
+    /// Resolve to a concrete on/off decision given the runtime environment.
+    ///
+    /// Precedence in `Auto` mode: `NO_COLOR` (any value) disables colour,
+    /// then falls back to stdout TTY detection. `Always`/`Never` are explicit
+    /// user overrides and ignore both signals.
+    fn resolve(self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal(),
+        }
+    }
+}
+
+/// Convert `-v`/`-q` counts into a tracing filter directive.
+fn verbosity_filter(verbose: u8, quiet: bool) -> &'static str {
+    if quiet {
+        return "error";
+    }
+    match verbose {
+        0 => "warn",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    }
 }
 
 /// CLI options shared by every subcommand.
@@ -129,6 +177,13 @@ enum Commands {
         #[command(flatten)]
         common: CommonOpts,
     },
+
+    /// Print a shell completion script to stdout
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 /// Read a newline-separated list of paths from a file, or stdin when `source`
@@ -156,14 +211,15 @@ fn read_file_list(source: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+            |_| tracing_subscriber::EnvFilter::new(verbosity_filter(cli.verbose, cli.quiet)),
+        ))
         .init();
 
-    let cli = Cli::parse();
+    let color_enabled = cli.color.resolve();
 
     match cli.command {
         Commands::Scan { common, suggest } => {
@@ -172,8 +228,8 @@ fn main() -> anyhow::Result<()> {
                 config.suggest.enabled = true;
             }
 
-            if config.output.format == OutputFormat::Text && std::io::stdout().is_terminal() {
-                config.output.color = true;
+            if config.output.format == OutputFormat::Text {
+                config.output.color = color_enabled;
             }
 
             let focus_files = common.focus_files()?;
@@ -192,8 +248,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Overview { common } => {
             let mut config = common.resolve()?;
 
-            if config.output.format == OutputFormat::Text && std::io::stdout().is_terminal() {
-                config.output.color = true;
+            if config.output.format == OutputFormat::Text {
+                config.output.color = color_enabled;
             }
 
             let focus_files = common.focus_files()?;
@@ -225,6 +281,12 @@ fn main() -> anyhow::Result<()> {
 
             print!("{output}");
 
+            Ok(())
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
             Ok(())
         }
     }
