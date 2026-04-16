@@ -165,6 +165,10 @@ Test suites accumulate their own kind of duplication — near-identical cases th
 
 Run the two passes separately (e.g. two CI steps, or two cached runs against the same repo) to keep the signal clean.
 
+## Focus scanning
+
+For commit hooks and CI steps that only care about the diff, `scan` and `stats` accept `--files <PATH>` (repeatable) and `--files-from <PATH|->` (list from file or stdin). Discovery and analysis still run over the whole tree — so a newly-introduced clone of an untouched helper is still found — but only pairs where at least one side lives in the focus set make it to the report. See [Commit-hook integration](commit-hooks.md) for the `git diff` recipe.
+
 ## The llms.txt surface
 
 Every page on this site is also served as raw Markdown at its source path (for this page, `how-it-works.md`). Two roll-up files round it out:
