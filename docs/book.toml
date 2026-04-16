@@ -1,0 +1,23 @@
+[book]
+title = "biston"
+description = "Structural clone detector and refactor suggester for Python"
+authors = ["mojzis"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book/html"
+
+[output.html]
+site-url = "/biston/"
+git-repository-url = "https://github.com/mojzis/biston"
+edit-url-template = "https://github.com/mojzis/biston/edit/main/docs/{path}"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+additional-css = ["custom.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
