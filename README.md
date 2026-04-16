@@ -40,6 +40,8 @@ Options:
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
       --suggest                Generate abstraction suggestions for similar pairs
+      --files <FILE>           Only emit pairs involving this file (repeat for multiple)
+      --files-from <PATH>      Read focus file list from PATH, or `-` for stdin
   -h, --help                   Print help
 ```
 
@@ -58,8 +60,27 @@ Options:
       --min-lines <MIN_LINES>  Minimum function length in lines
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
+      --files <FILE>           Only emit pairs involving this file (repeat for multiple)
+      --files-from <PATH>      Read focus file list from PATH, or `-` for stdin
   -h, --help                   Print help
 ```
+
+#### Commit-hook use (focus files)
+
+`--files` / `--files-from` let you restrict reporting to pairs involving a
+specific set of files, while still scanning the whole repo so cross-file
+clones between those files and the rest of the tree are detected.
+
+For a pre-commit hook, pipe `git diff --name-only` through `--files-from -`:
+
+```bash
+git diff --name-only --diff-filter=ACM -- '*.py' \
+  | biston scan --files-from - .
+```
+
+An empty list (no Python files changed) correctly emits no pairs. Prefer
+`--files-from` over `--files $(git diff --name-only)` — the latter expands to
+an empty flag when nothing changed, which reverts to a full-repo scan.
 
 ## Configuration
 
