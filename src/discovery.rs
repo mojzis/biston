@@ -128,6 +128,64 @@ mod tests {
     }
 
     #[test]
+    fn default_excludes_actually_skip_tests_and_migrations() {
+        // Regression test: the default exclude globs must use `tests/**` /
+        // `migrations/**` form (not bare `tests/`) or they silently match
+        // nothing under glob_match semantics.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("tests")).expect("mkdir tests");
+        std::fs::create_dir_all(dir.path().join("migrations")).expect("mkdir migrations");
+        std::fs::write(dir.path().join("main.py"), "# prod").expect("write");
+        std::fs::write(dir.path().join("tests/test_main.py"), "# test").expect("write");
+        std::fs::write(dir.path().join("migrations/0001.py"), "# migration").expect("write");
+        std::fs::write(dir.path().join("conftest.py"), "# conftest").expect("write");
+
+        let files = discover_files(dir.path(), &ScanConfig::default()).expect("discover");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.strip_prefix(dir.path()).unwrap_or(f).to_string_lossy().replace('\\', "/"))
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["main.py".to_owned()],
+            "default excludes should drop tests/migrations/conftest; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn tests_only_scope_finds_test_files_and_skips_production() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        std::fs::create_dir_all(dir.path().join("tests/sub")).expect("mkdir");
+        std::fs::create_dir_all(dir.path().join("backend/tests")).expect("mkdir backend/tests");
+        std::fs::write(dir.path().join("src/main.py"), "# prod").expect("write");
+        std::fs::write(dir.path().join("tests/test_main.py"), "# test").expect("write");
+        std::fs::write(dir.path().join("tests/helpers.py"), "# helper").expect("write");
+        std::fs::write(dir.path().join("tests/sub/widgets_test.py"), "# test").expect("write");
+        std::fs::write(dir.path().join("conftest.py"), "# conftest").expect("write");
+        // Monorepo-style nested tests/ directory.
+        std::fs::write(dir.path().join("backend/tests/fixtures.py"), "# fixture")
+            .expect("write nested fixture");
+
+        let mut config = ScanConfig::default();
+        config.scope_to_tests();
+
+        let files = discover_files(dir.path(), &config).expect("discover");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.strip_prefix(dir.path()).unwrap_or(f).to_string_lossy().replace('\\', "/"))
+            .collect();
+
+        assert!(names.contains(&"tests/test_main.py".to_owned()), "{names:?}");
+        assert!(names.contains(&"tests/helpers.py".to_owned()), "{names:?}");
+        assert!(names.contains(&"tests/sub/widgets_test.py".to_owned()), "{names:?}");
+        assert!(names.contains(&"conftest.py".to_owned()), "{names:?}");
+        assert!(names.contains(&"backend/tests/fixtures.py".to_owned()), "{names:?}");
+        assert!(!names.contains(&"src/main.py".to_owned()), "{names:?}");
+    }
+
+    #[test]
     fn respects_gitignore() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Initialize a git repo so .gitignore is respected

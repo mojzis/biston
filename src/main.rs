@@ -2,7 +2,7 @@ use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use biston::config::{Config, OutputFormat};
 use biston::report;
@@ -15,105 +15,113 @@ struct Cli {
     command: Commands,
 }
 
+/// CLI options shared by every subcommand.
+///
+/// Flattened into each `Commands` variant so the flag set and override
+/// precedence stay in a single place. Subcommand-specific flags (like
+/// `--suggest` for `scan`) live alongside the flattened `CommonOpts`.
+#[derive(Args)]
+struct CommonOpts {
+    /// Directory to scan
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// Output format
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+
+    /// Minimum function length in lines
+    #[arg(long)]
+    min_lines: Option<usize>,
+
+    /// Similarity threshold (0.0 - 1.0)
+    #[arg(long)]
+    threshold: Option<f64>,
+
+    /// Config file directory (looks for biston.toml or pyproject.toml)
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Restrict the scan to Python test files (overrides include/exclude)
+    #[arg(long)]
+    tests_only: bool,
+
+    /// Only emit pairs involving this file (repeat the flag for multiple files).
+    /// The rest of the tree is still scanned so cross-file clones between a
+    /// focus file and the rest of the repo are still detected.
+    ///
+    /// Note: `--files $(git diff --name-only)` will silently expand to an
+    /// empty flag when no files changed, which reverts to a full scan.
+    /// For commit hooks, prefer `--files-from -` piped from `git diff`:
+    /// that cleanly handles the empty case as "no pairs to emit."
+    #[arg(long = "files", value_name = "FILE", action = clap::ArgAction::Append)]
+    files: Vec<PathBuf>,
+
+    /// Read focus file list from this path (one path per line).
+    /// Use `-` to read from stdin. An empty list means "no focus files"
+    /// and suppresses all pairs — ideal for commit hooks that pipe
+    /// `git diff --name-only` directly.
+    #[arg(long = "files-from", value_name = "PATH", conflicts_with = "files")]
+    files_from: Option<PathBuf>,
+}
+
+impl CommonOpts {
+    /// Load config from disk and apply the shared CLI overrides.
+    fn resolve(&self) -> anyhow::Result<Config> {
+        let config_path = self.config.as_deref().unwrap_or(&self.path);
+        let mut config = Config::load(config_path).context("failed to load config")?;
+
+        if let Some(fmt) = self.format {
+            config.output.format = fmt;
+        }
+        if let Some(ml) = self.min_lines {
+            config.scan.min_lines = ml;
+        }
+        if let Some(th) = self.threshold {
+            config.scan.threshold = th;
+        }
+        if self.tests_only {
+            config.scan.scope_to_tests();
+        }
+
+        Ok(config)
+    }
+
+    /// Resolve the focus file list from the two mutually-exclusive CLI options.
+    ///
+    /// Returns `None` when the user supplied neither flag (= scan everything,
+    /// no filtering). Returns `Some(vec)` otherwise — an empty vec is a valid
+    /// "no files changed" signal and suppresses all pairs.
+    fn focus_files(&self) -> anyhow::Result<Option<Vec<PathBuf>>> {
+        if let Some(source) = self.files_from.as_deref() {
+            let lines = read_file_list(source)
+                .with_context(|| format!("failed to read file list from {}", source.display()))?;
+            return Ok(Some(lines));
+        }
+        if !self.files.is_empty() {
+            return Ok(Some(self.files.clone()));
+        }
+        Ok(None)
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Scan a directory for code clones
     Scan {
-        /// Directory to scan
-        #[arg(default_value = ".")]
-        path: PathBuf,
-
-        /// Output format
-        #[arg(long, value_enum)]
-        format: Option<OutputFormat>,
-
-        /// Minimum function length in lines
-        #[arg(long)]
-        min_lines: Option<usize>,
-
-        /// Similarity threshold (0.0 - 1.0)
-        #[arg(long)]
-        threshold: Option<f64>,
-
-        /// Config file directory (looks for biston.toml or pyproject.toml)
-        #[arg(long)]
-        config: Option<PathBuf>,
+        #[command(flatten)]
+        common: CommonOpts,
 
         /// Generate abstraction suggestions for similar pairs
         #[arg(long)]
         suggest: bool,
-
-        /// Only emit pairs involving this file (repeat the flag for multiple files).
-        /// The rest of the directory is still scanned so cross-file clones
-        /// between a focus file and the rest of the repo are still detected.
-        ///
-        /// Note: `--files $(git diff --name-only)` will silently expand to an
-        /// empty flag when no files changed, which reverts to a full scan.
-        /// For commit hooks, prefer `--files-from -` piped from `git diff`:
-        /// that cleanly handles the empty case as "no pairs to emit."
-        #[arg(long = "files", value_name = "FILE", action = clap::ArgAction::Append)]
-        files: Vec<PathBuf>,
-
-        /// Read focus file list from this path (one path per line).
-        /// Use `-` to read from stdin. An empty list means "no focus files"
-        /// and suppresses all pairs — ideal for commit hooks that pipe
-        /// `git diff --name-only` directly.
-        #[arg(long = "files-from", value_name = "PATH", conflicts_with = "files")]
-        files_from: Option<PathBuf>,
     },
 
     /// Show statistics about scan findings
     Stats {
-        /// Directory to scan
-        #[arg(default_value = ".")]
-        path: PathBuf,
-
-        /// Output format (text or json)
-        #[arg(long, value_enum)]
-        format: Option<OutputFormat>,
-
-        /// Minimum function length in lines
-        #[arg(long)]
-        min_lines: Option<usize>,
-
-        /// Similarity threshold (0.0 - 1.0)
-        #[arg(long)]
-        threshold: Option<f64>,
-
-        /// Config file directory (looks for biston.toml or pyproject.toml)
-        #[arg(long)]
-        config: Option<PathBuf>,
-
-        /// Only emit pairs involving this file (repeat for multiple files).
-        /// See `scan --files` for details.
-        #[arg(long = "files", value_name = "FILE", action = clap::ArgAction::Append)]
-        files: Vec<PathBuf>,
-
-        /// Read focus file list from this path (one path per line).
-        /// Use `-` to read from stdin.
-        #[arg(long = "files-from", value_name = "PATH", conflicts_with = "files")]
-        files_from: Option<PathBuf>,
+        #[command(flatten)]
+        common: CommonOpts,
     },
-}
-
-/// Resolve the focus file list from the two mutually-exclusive CLI options.
-///
-/// Returns `None` when the user supplied neither flag (= scan everything, no
-/// filtering). Returns `Some(vec)` otherwise — an empty vec is a valid "no
-/// files changed" signal and suppresses all pairs.
-fn resolve_focus_files(
-    files: Vec<PathBuf>,
-    files_from: Option<PathBuf>,
-) -> anyhow::Result<Option<Vec<PathBuf>>> {
-    if let Some(source) = files_from {
-        let lines = read_file_list(&source)
-            .with_context(|| format!("failed to read file list from {}", source.display()))?;
-        return Ok(Some(lines));
-    }
-    if !files.is_empty() {
-        return Ok(Some(files));
-    }
-    Ok(None)
 }
 
 /// Read a newline-separated list of paths from a file, or stdin when `source`
@@ -151,30 +159,8 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan {
-            path,
-            format,
-            min_lines,
-            threshold,
-            config: config_dir,
-            suggest,
-            files,
-            files_from,
-        } => {
-            // Load config from directory (or scan path)
-            let config_path = config_dir.as_deref().unwrap_or(&path);
-            let mut config = Config::load(config_path).context("failed to load config")?;
-
-            // Apply CLI overrides
-            if let Some(fmt) = format {
-                config.output.format = fmt;
-            }
-            if let Some(ml) = min_lines {
-                config.scan.min_lines = ml;
-            }
-            if let Some(th) = threshold {
-                config.scan.threshold = th;
-            }
+        Commands::Scan { common, suggest } => {
+            let mut config = common.resolve()?;
             if suggest {
                 config.suggest.enabled = true;
             }
@@ -183,8 +169,8 @@ fn main() -> anyhow::Result<()> {
                 config.output.color = true;
             }
 
-            let focus_files = resolve_focus_files(files, files_from)?;
-            let report = biston::scan_focused(&path, &config, focus_files.as_deref())?;
+            let focus_files = common.focus_files()?;
+            let report = biston::scan_focused(&common.path, &config, focus_files.as_deref())?;
 
             let output = match config.output.format {
                 OutputFormat::Text => report::format_text(&report, &config.output),
@@ -196,30 +182,11 @@ fn main() -> anyhow::Result<()> {
 
             Ok(())
         }
-        Commands::Stats {
-            path,
-            format,
-            min_lines,
-            threshold,
-            config: config_dir,
-            files,
-            files_from,
-        } => {
-            let config_path = config_dir.as_deref().unwrap_or(&path);
-            let mut config = Config::load(config_path).context("failed to load config")?;
+        Commands::Stats { common } => {
+            let config = common.resolve()?;
 
-            if let Some(fmt) = format {
-                config.output.format = fmt;
-            }
-            if let Some(ml) = min_lines {
-                config.scan.min_lines = ml;
-            }
-            if let Some(th) = threshold {
-                config.scan.threshold = th;
-            }
-
-            let focus_files = resolve_focus_files(files, files_from)?;
-            let report = biston::scan_focused(&path, &config, focus_files.as_deref())?;
+            let focus_files = common.focus_files()?;
+            let report = biston::scan_focused(&common.path, &config, focus_files.as_deref())?;
             let scan_stats = stats::compute_stats(&report);
 
             let output = match config.output.format {

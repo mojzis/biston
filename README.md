@@ -39,6 +39,7 @@ Options:
       --min-lines <MIN_LINES>  Minimum function length in lines
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
+      --tests-only             Restrict the scan to Python test files (overrides include/exclude)
       --suggest                Generate abstraction suggestions for similar pairs
       --files <FILE>           Only emit pairs involving this file (repeat for multiple)
       --files-from <PATH>      Read focus file list from PATH, or `-` for stdin
@@ -56,14 +57,26 @@ Arguments:
   [PATH]  Directory to scan [default: .]
 
 Options:
-      --format <FORMAT>        Output format (text or json) [possible values: text, json, sarif]
+      --format <FORMAT>        Output format [possible values: text, json, sarif]
       --min-lines <MIN_LINES>  Minimum function length in lines
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
+      --tests-only             Restrict the scan to Python test files (overrides include/exclude)
       --files <FILE>           Only emit pairs involving this file (repeat for multiple)
       --files-from <PATH>      Read focus file list from PATH, or `-` for stdin
   -h, --help                   Print help
 ```
+
+##### Scanning tests only
+
+Test suites often accumulate duplication (near-identical cases that could be `@pytest.mark.parametrize`, copy-pasted arrange/act/assert blocks). By default biston excludes test files so production-code findings stay focused. Pass `--tests-only` to flip the scope and scan only test files:
+
+```
+biston scan --tests-only
+biston stats --tests-only
+```
+
+The flag replaces `include` with common Python test patterns (`**/test_*.py`, `**/*_test.py`, `**/conftest.py`, `tests/**/*.py`) and clears `exclude`. Other knobs (`min_lines`, `threshold`, normalization) are left untouched — tune them separately in `biston.toml` if you want different defaults for a test run.
 
 #### Commit-hook use (focus files)
 
@@ -92,7 +105,7 @@ Settings can go in `biston.toml` or under `[tool.biston]` in `pyproject.toml`. I
 |---|---|---|
 | `min_lines` | `10` | Minimum function length in lines |
 | `threshold` | `0.7` | Similarity threshold (0.0–1.0) |
-| `exclude` | `["tests/", "**/conftest.py", "migrations/"]` | File patterns to exclude |
+| `exclude` | `["tests/**", "**/conftest.py", "migrations/**"]` | File patterns to exclude |
 | `include` | `["**/*.py"]` | File patterns to include |
 
 ### `[normalization]`
