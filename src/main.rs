@@ -42,6 +42,10 @@ enum Commands {
         /// Generate abstraction suggestions for similar pairs
         #[arg(long)]
         suggest: bool,
+
+        /// Restrict the scan to Python test files (overrides include/exclude)
+        #[arg(long)]
+        tests_only: bool,
     },
 
     /// Show statistics about scan findings
@@ -65,6 +69,10 @@ enum Commands {
         /// Config file directory (looks for biston.toml or pyproject.toml)
         #[arg(long)]
         config: Option<PathBuf>,
+
+        /// Restrict the scan to Python test files (overrides include/exclude)
+        #[arg(long)]
+        tests_only: bool,
     },
 }
 
@@ -79,7 +87,15 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { path, format, min_lines, threshold, config: config_dir, suggest } => {
+        Commands::Scan {
+            path,
+            format,
+            min_lines,
+            threshold,
+            config: config_dir,
+            suggest,
+            tests_only,
+        } => {
             // Load config from directory (or scan path)
             let config_path = config_dir.as_deref().unwrap_or(&path);
             let mut config = Config::load(config_path).context("failed to load config")?;
@@ -96,6 +112,9 @@ fn main() -> anyhow::Result<()> {
             }
             if suggest {
                 config.suggest.enabled = true;
+            }
+            if tests_only {
+                config.scan.scope_to_tests();
             }
 
             if config.output.format == OutputFormat::Text && std::io::stdout().is_terminal() {
@@ -114,7 +133,7 @@ fn main() -> anyhow::Result<()> {
 
             Ok(())
         }
-        Commands::Stats { path, format, min_lines, threshold, config: config_dir } => {
+        Commands::Stats { path, format, min_lines, threshold, config: config_dir, tests_only } => {
             let config_path = config_dir.as_deref().unwrap_or(&path);
             let mut config = Config::load(config_path).context("failed to load config")?;
 
@@ -126,6 +145,9 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(th) = threshold {
                 config.scan.threshold = th;
+            }
+            if tests_only {
+                config.scan.scope_to_tests();
             }
 
             let report = biston::scan(&path, &config)?;

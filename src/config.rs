@@ -85,12 +85,32 @@ impl Default for ScanConfig {
             min_lines: 10,
             threshold: 0.7,
             exclude: vec![
-                "tests/".to_owned(),
+                "tests/**".to_owned(),
                 "**/conftest.py".to_owned(),
-                "migrations/".to_owned(),
+                "migrations/**".to_owned(),
             ],
             include: vec!["**/*.py".to_owned()],
         }
+    }
+}
+
+impl ScanConfig {
+    /// Common glob patterns identifying Python test files.
+    ///
+    /// Matches pytest's default discovery conventions (`test_*.py`, `*_test.py`,
+    /// `conftest.py`) plus anything under any `tests/` directory (including
+    /// nested monorepo layouts like `backend/tests/helpers.py`).
+    pub const TEST_FILE_PATTERNS: &'static [&'static str] =
+        &["**/test_*.py", "**/*_test.py", "**/conftest.py", "tests/**/*.py", "**/tests/**/*.py"];
+
+    /// Narrow the scan scope to test files only.
+    ///
+    /// Replaces `include` with [`Self::TEST_FILE_PATTERNS`] and clears `exclude`
+    /// so that the default test-suppressing excludes no longer apply. Other
+    /// scan knobs (`min_lines`, `threshold`) are left untouched.
+    pub fn scope_to_tests(&mut self) {
+        self.include = Self::TEST_FILE_PATTERNS.iter().copied().map(String::from).collect();
+        self.exclude = Vec::new();
     }
 }
 
@@ -296,6 +316,29 @@ min_lines = 5
 ";
         let config: Config = toml::from_str(toml_str).expect("should parse");
         assert!(config.suppress.files.is_empty());
+    }
+
+    #[test]
+    fn scope_to_tests_replaces_include_with_test_patterns() {
+        let mut config = ScanConfig::default();
+        config.scope_to_tests();
+        assert_eq!(config.include, ScanConfig::TEST_FILE_PATTERNS);
+    }
+
+    #[test]
+    fn scope_to_tests_clears_exclude_list() {
+        let mut config = ScanConfig::default();
+        assert!(!config.exclude.is_empty(), "default exclude should be non-empty");
+        config.scope_to_tests();
+        assert!(config.exclude.is_empty());
+    }
+
+    #[test]
+    fn scope_to_tests_preserves_threshold_and_min_lines() {
+        let mut config = ScanConfig { min_lines: 25, threshold: 0.85, ..ScanConfig::default() };
+        config.scope_to_tests();
+        assert_eq!(config.min_lines, 25);
+        assert!((config.threshold - 0.85).abs() < f64::EPSILON);
     }
 
     #[test]
