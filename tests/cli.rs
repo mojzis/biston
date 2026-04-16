@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, reason = "integration-test helpers treat setup failures as fatal")]
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 

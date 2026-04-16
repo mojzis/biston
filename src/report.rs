@@ -66,8 +66,8 @@ pub(crate) fn cluster_pairs(pairs: &[SimilarPair], num_functions: usize) -> Vec<
     // Collect all members for each group
     for i in 0..num_functions {
         let root = find(&mut parent, i);
-        if groups.contains_key(&root) {
-            groups.get_mut(&root).expect("group exists").push(i);
+        if let Some(members) = groups.get_mut(&root) {
+            members.push(i);
         }
     }
 

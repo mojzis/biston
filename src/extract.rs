@@ -19,6 +19,10 @@ pub struct FunctionFragment {
 }
 
 /// Extract all functions from a parsed file that meet the minimum line count.
+#[allow(
+    clippy::expect_used,
+    reason = "static tree-sitter query is hard-coded; capture names must exist"
+)]
 pub fn extract_functions(parsed: &ParsedFile, min_lines: usize) -> Vec<FunctionFragment> {
     let query = function_query(&parsed.tree);
     let mut cursor = tree_sitter::QueryCursor::new();
@@ -80,6 +84,7 @@ pub fn extract_functions(parsed: &ParsedFile, min_lines: usize) -> Vec<FunctionF
 ///
 /// The query matches both plain `function_definition` and `decorated_definition`
 /// wrapping a function.
+#[allow(clippy::expect_used, reason = "hard-coded tree-sitter query is known-valid")]
 fn function_query(tree: &tree_sitter::Tree) -> &'static tree_sitter::Query {
     static QUERY: OnceLock<tree_sitter::Query> = OnceLock::new();
     QUERY.get_or_init(|| {

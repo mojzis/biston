@@ -5,6 +5,8 @@ edition = "2021"
 description = "A tool for analyzing Python code"
 license = "MIT"
 repository = "https://github.com/mojzis/biston"
+keywords = ["python", "clone-detection", "static-analysis", "duplication", "refactoring"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -48,17 +50,25 @@ unsafe_code = "deny"
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
 
 # Cherry-picked restriction lints
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
 unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
 undocumented_unsafe_blocks = "warn"
 clone_on_ref_ptr = "warn"
 exit = "warn"
 await_holding_lock = "warn"
 large_futures = "warn"
+allow_attributes_without_reason = "warn"
+missing_assert_message = "warn"
+
+# Cargo group allows
+multiple_crate_versions = "allow"
 
 # Pedantic allows (too noisy)
 module_name_repetitions = "allow"

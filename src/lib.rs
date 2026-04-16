@@ -154,7 +154,11 @@ pub fn scan_focused(
 
     let suggestions = build_suggestions(config, &pairs, &normalized, &functions);
 
-    debug_assert_eq!(functions.len(), normalized.len());
+    debug_assert_eq!(
+        functions.len(),
+        normalized.len(),
+        "each function must have a corresponding normalized node"
+    );
     Ok(CloneReport { files_scanned, functions, normalized, pairs, suggestions, suppression_stats })
 }
 
