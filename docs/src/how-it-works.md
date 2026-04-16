@@ -27,7 +27,7 @@ Each stage lives in its own module:
 
 | Stage | Module | What it does |
 |-------|--------|--------------|
-| discovery | `src/discovery.rs` | Walks the tree with the `ignore` crate; respects `.gitignore`, include/exclude globs. |
+| discovery | `src/discovery.rs` | Walks the tree with the `ignore` crate; respects `.gitignore`, include/exclude globs. Test directories and migrations are excluded by default. |
 | parse | `src/parse.rs` | Feeds each file into tree-sitter-python, yields a concrete syntax tree. |
 | extract | `src/extract.rs` | Slices out every `function_definition` as a `FunctionFragment`. |
 | normalize | `src/normalize.rs` | Converts each fragment into a `NormalizedNode` tree — a canonical form. |
@@ -155,6 +155,15 @@ The `stats` subcommand shares the pipeline but emits aggregate counts instead of
 ## Configuration & suppression
 
 Config lives in `biston.toml` or under `[tool.biston]` in `pyproject.toml`. CLI flags override config values. File-level and function-level suppression is available via config globs or inline `# biston: ignore` / `# biston: ignore-file` comments. The full key-by-key reference lives in the [project README](https://github.com/mojzis/biston#configuration).
+
+## Scanning tests
+
+Test suites accumulate their own kind of duplication — near-identical cases that could collapse into `@pytest.mark.parametrize`, copy-pasted arrange/act/assert blocks, repeated fixture plumbing — but that noise usually drowns out production-code findings when mixed into the same report. biston splits the two:
+
+- **By default**, the `scan.exclude` globs (`tests/**`, `**/conftest.py`, `migrations/**`) drop test files at the discovery stage, so `biston scan` and `biston stats` only see your application code.
+- **`--tests-only`** (on both `scan` and `stats`) inverts the scope: `include` is replaced with common Python test patterns (`**/test_*.py`, `**/*_test.py`, `**/conftest.py`, `tests/**/*.py`, `**/tests/**/*.py` — the last covering monorepo layouts like `backend/tests/helpers.py`), and `exclude` is cleared. Other knobs (`min_lines`, `threshold`, normalization) are untouched; tune them in `biston.toml` if your tests want a different baseline than your production code.
+
+Run the two passes separately (e.g. two CI steps, or two cached runs against the same repo) to keep the signal clean.
 
 ## The llms.txt surface
 
