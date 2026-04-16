@@ -39,8 +39,8 @@ Options:
       --min-lines <MIN_LINES>  Minimum function length in lines
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
-      --suggest                Generate abstraction suggestions for similar pairs
       --tests-only             Restrict the scan to Python test files (overrides include/exclude)
+      --suggest                Generate abstraction suggestions for similar pairs
   -h, --help                   Print help
 ```
 
@@ -55,7 +55,7 @@ Arguments:
   [PATH]  Directory to scan [default: .]
 
 Options:
-      --format <FORMAT>        Output format (text or json) [possible values: text, json, sarif]
+      --format <FORMAT>        Output format [possible values: text, json, sarif]
       --min-lines <MIN_LINES>  Minimum function length in lines
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
