@@ -151,6 +151,10 @@ You can also suppress findings with Python comments:
 - `# biston: ignore-file` — suppress the entire file (must appear in the first 5 lines)
 - `# biston: ignore` — suppress a single function (place in the function body or on the preceding line)
 
+## Documentation
+
+Full docs at <https://mojzis.github.io/biston/>.
+
 ## License
 
 MIT
