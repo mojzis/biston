@@ -296,7 +296,7 @@ fn collect_bindings_from_node(node: tree_sitter::Node<'_>, source: &[u8], scope:
         "except_clause" => {
             let count = node.named_child_count();
             if count >= 2 {
-                #[allow(clippy::cast_possible_truncation)] // AST child count won't exceed u32
+                #[allow(clippy::cast_possible_truncation, reason = "AST child count fits in u32")]
                 if let Some(name_node) = node.named_child((count - 1) as u32) {
                     if name_node.kind() == "identifier" || name_node.kind() == "as_pattern" {
                         collect_identifiers(name_node, source, scope);
