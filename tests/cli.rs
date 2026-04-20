@@ -345,10 +345,11 @@ fn scan_focus_args_matches_files_flag() {
         serde_json::from_slice(&via_focus_args.stdout).expect("valid json");
     let files_json: serde_json::Value =
         serde_json::from_slice(&via_files.stdout).expect("valid json");
+    // Compare cluster *content*, not just count: a swap or canonicalisation
+    // regression that left pair counts unchanged would otherwise slip past.
     assert_eq!(
-        cluster_count(&focus_json),
-        cluster_count(&files_json),
-        "--focus-args should produce the same clusters as --files"
+        focus_json["clusters"], files_json["clusters"],
+        "--focus-args and --files should emit identical clusters"
     );
 }
 
@@ -420,7 +421,10 @@ fn stats_focus_args_matches_files_flag() {
         serde_json::from_slice(&via_focus_args.stdout).expect("valid json");
     let files_json: serde_json::Value =
         serde_json::from_slice(&via_files.stdout).expect("valid json");
-    assert_eq!(focus_json["clone_pairs"], files_json["clone_pairs"]);
+    assert_eq!(
+        focus_json, files_json,
+        "--focus-args and --files should emit identical stats payloads"
+    );
 }
 
 #[test]
