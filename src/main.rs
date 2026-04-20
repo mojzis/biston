@@ -71,9 +71,13 @@ fn verbosity_filter(verbose: u8, quiet: bool) -> &'static str {
 /// `--suggest` for `scan`) live alongside the flattened `CommonOpts`.
 #[derive(Args)]
 struct CommonOpts {
-    /// Directory to scan
-    #[arg(default_value = ".")]
-    path: PathBuf,
+    /// Scan root (default `.`), or focus files when `--focus-args` is set.
+    ///
+    /// Without `--focus-args`, at most one positional is accepted and it
+    /// names the directory to scan. With `--focus-args`, every positional
+    /// is interpreted as a focus file and the scan root is implicitly `.`.
+    #[arg(value_name = "PATH", num_args = 0..)]
+    positionals: Vec<PathBuf>,
 
     /// Output format
     #[arg(long, value_enum)]
@@ -112,12 +116,44 @@ struct CommonOpts {
     /// `git diff --name-only` directly.
     #[arg(long = "files-from", value_name = "PATH", conflicts_with = "files")]
     files_from: Option<PathBuf>,
+
+    /// Interpret positional arguments as focus files (scan root is `.`).
+    ///
+    /// Designed for `pre-commit` / `prek` integration: the framework passes
+    /// changed files as trailing positional arguments. An empty list is a
+    /// silent pass, matching `--files-from -` with empty stdin.
+    #[arg(long = "focus-args", conflicts_with_all = ["files", "files_from"])]
+    focus_args: bool,
 }
 
 impl CommonOpts {
+    /// Resolve the scan root from the positional arguments and `--focus-args`.
+    ///
+    /// Without `--focus-args`: 0 positionals → `.`, 1 positional → that path,
+    /// 2+ positionals → error. With `--focus-args`: always `.` (positionals
+    /// are focus files, not paths).
+    fn scan_path(&self) -> anyhow::Result<PathBuf> {
+        if self.focus_args {
+            return Ok(PathBuf::from("."));
+        }
+        match self.positionals.as_slice() {
+            [] => Ok(PathBuf::from(".")),
+            [p] => Ok(p.clone()),
+            extras => anyhow::bail!(
+                "too many positional arguments ({}): pass --focus-args to \
+                 interpret positionals as focus files",
+                extras.len(),
+            ),
+        }
+    }
+
     /// Load config from disk and apply the shared CLI overrides.
-    fn resolve(&self) -> anyhow::Result<Config> {
-        let config_path = self.config.as_deref().unwrap_or(&self.path);
+    ///
+    /// Returns the resolved `Config` alongside the scan root so callers don't
+    /// have to compute the scan path twice.
+    fn resolve(&self) -> anyhow::Result<(Config, PathBuf)> {
+        let scan_path = self.scan_path()?;
+        let config_path = self.config.as_deref().unwrap_or(&scan_path);
         let mut config = Config::load(config_path).context("failed to load config")?;
 
         if let Some(fmt) = self.format {
@@ -133,15 +169,18 @@ impl CommonOpts {
             config.scan.scope_to_tests();
         }
 
-        Ok(config)
+        Ok((config, scan_path))
     }
 
-    /// Resolve the focus file list from the two mutually-exclusive CLI options.
+    /// Resolve the focus file list from the three mutually-exclusive CLI options.
     ///
-    /// Returns `None` when the user supplied neither flag (= scan everything,
+    /// Returns `None` when the user supplied no focus flag (= scan everything,
     /// no filtering). Returns `Some(vec)` otherwise — an empty vec is a valid
     /// "no files changed" signal and suppresses all pairs.
     fn focus_files(&self) -> anyhow::Result<Option<Vec<PathBuf>>> {
+        if self.focus_args {
+            return Ok(Some(self.positionals.clone()));
+        }
         if let Some(source) = self.files_from.as_deref() {
             let lines = read_file_list(source)
                 .with_context(|| format!("failed to read file list from {}", source.display()))?;
@@ -223,7 +262,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Scan { common, suggest } => {
-            let mut config = common.resolve()?;
+            let (mut config, scan_path) = common.resolve()?;
             if suggest {
                 config.suggest.enabled = true;
             }
@@ -233,7 +272,7 @@ fn main() -> anyhow::Result<()> {
             }
 
             let focus_files = common.focus_files()?;
-            let report = biston::scan_focused(&common.path, &config, focus_files.as_deref())?;
+            let report = biston::scan_focused(&scan_path, &config, focus_files.as_deref())?;
 
             let output = match config.output.format {
                 OutputFormat::Text => report::format_text(&report, &config.output),
@@ -246,14 +285,14 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Overview { common } => {
-            let mut config = common.resolve()?;
+            let (mut config, scan_path) = common.resolve()?;
 
             if config.output.format == OutputFormat::Text {
                 config.output.color = color_enabled;
             }
 
             let focus_files = common.focus_files()?;
-            let report = biston::scan_focused(&common.path, &config, focus_files.as_deref())?;
+            let report = biston::scan_focused(&scan_path, &config, focus_files.as_deref())?;
             let overviews = overview::compute_overview(&report);
 
             let output = match config.output.format {
@@ -268,10 +307,10 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Stats { common } => {
-            let config = common.resolve()?;
+            let (config, scan_path) = common.resolve()?;
 
             let focus_files = common.focus_files()?;
-            let report = biston::scan_focused(&common.path, &config, focus_files.as_deref())?;
+            let report = biston::scan_focused(&scan_path, &config, focus_files.as_deref())?;
             let scan_stats = stats::compute_stats(&report);
 
             let output = match config.output.format {

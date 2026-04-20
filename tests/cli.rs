@@ -321,6 +321,242 @@ fn scan_files_from_stdin_reads_list() {
 }
 
 #[test]
+fn scan_focus_args_matches_files_flag() {
+    // `--focus-args a.py b.py` (positional focus files, implicit `.` scan root)
+    // should produce the same report as `--files a.py --files b.py .`.
+    let dir = common::multi_file_dir();
+
+    let via_focus_args = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["scan", "--focus-args", "--format", "json", "a.py", "b.py"])
+        .output()
+        .unwrap();
+    let via_files = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["scan", "--files", "a.py", "--files", "b.py", "--format", "json", "."])
+        .output()
+        .unwrap();
+
+    assert!(via_focus_args.status.success(), "focus-args invocation should succeed");
+    assert!(via_files.status.success(), "files invocation should succeed");
+    let focus_json: serde_json::Value =
+        serde_json::from_slice(&via_focus_args.stdout).expect("valid json");
+    let files_json: serde_json::Value =
+        serde_json::from_slice(&via_files.stdout).expect("valid json");
+    // Compare cluster *content*, not just count: a swap or canonicalisation
+    // regression that left pair counts unchanged would otherwise slip past.
+    assert_eq!(
+        focus_json["clusters"], files_json["clusters"],
+        "--focus-args and --files should emit identical clusters"
+    );
+}
+
+#[test]
+fn scan_focus_args_empty_emits_no_pairs() {
+    // Simulates pre-commit invoking the hook on a commit that touched no
+    // Python files: positional list is empty, exit 0, no pairs reported.
+    let dir = common::multi_file_dir();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["scan", "--focus-args", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::function(|out: &str| {
+            let json: serde_json::Value = serde_json::from_str(out).expect("valid json");
+            cluster_count(&json) == 0
+        }));
+}
+
+#[test]
+fn scan_focus_args_conflicts_with_files() {
+    let dir = common::multi_file_dir();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["scan", "--focus-args", "a.py", "--files", "b.py"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--focus-args").and(predicate::str::contains("--files")));
+}
+
+#[test]
+fn scan_focus_args_conflicts_with_files_from() {
+    let dir = common::multi_file_dir();
+    let list = dir.path().join("changed.txt");
+    std::fs::write(&list, "a.py\n").expect("write list");
+    Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["scan", "--focus-args", "a.py", "--files-from", list.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("--focus-args").and(predicate::str::contains("--files-from")),
+        );
+}
+
+#[test]
+fn stats_focus_args_matches_files_flag() {
+    let dir = common::multi_file_dir();
+
+    let via_focus_args = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["stats", "--focus-args", "--format", "json", "a.py"])
+        .output()
+        .unwrap();
+    let via_files = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["stats", "--files", "a.py", "--format", "json", "."])
+        .output()
+        .unwrap();
+
+    assert!(via_focus_args.status.success());
+    assert!(via_files.status.success());
+    let focus_json: serde_json::Value =
+        serde_json::from_slice(&via_focus_args.stdout).expect("valid json");
+    let files_json: serde_json::Value =
+        serde_json::from_slice(&via_files.stdout).expect("valid json");
+    assert_eq!(
+        focus_json, files_json,
+        "--focus-args and --files should emit identical stats payloads"
+    );
+}
+
+#[test]
+fn stats_focus_args_empty_reports_zero_pairs() {
+    let dir = common::multi_file_dir();
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["stats", "--focus-args", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["clone_pairs"].as_u64().unwrap(), 0);
+}
+
+#[test]
+fn stats_focus_args_conflicts_with_files() {
+    let dir = common::multi_file_dir();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["stats", "--focus-args", "a.py", "--files", "b.py"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--focus-args").and(predicate::str::contains("--files")));
+}
+
+#[test]
+fn stats_focus_args_conflicts_with_files_from() {
+    let dir = common::multi_file_dir();
+    let list = dir.path().join("changed.txt");
+    std::fs::write(&list, "a.py\n").expect("write list");
+    Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["stats", "--focus-args", "a.py", "--files-from", list.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("--focus-args").and(predicate::str::contains("--files-from")),
+        );
+}
+
+// --- Pre-commit invocation pattern ---
+//
+// Simulates how `pre-commit` / `prek` invoke the hook: the framework changes
+// to the repo root and passes the staged Python files as trailing positional
+// arguments to `biston scan --focus-args`. Uses a fixture with two
+// independent clone pairs so we can verify that focusing on one pair hides
+// the other.
+
+#[test]
+fn precommit_style_focus_reports_only_involved_cluster() {
+    // A↔B clone pair (filter shape), C↔D clone pair (aggregate shape).
+    // Focusing on A.py should surface A↔B and hide C↔D entirely.
+    let dir = common::multi_file_dir();
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["scan", "--focus-args", "--format", "json", "a.py"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(cluster_count(&json), 1, "only the a↔b cluster should remain");
+    let cluster = &json["clusters"][0];
+    let files: Vec<String> = cluster["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|f| f["file"].as_str().map(std::string::ToString::to_string))
+        .collect();
+    assert!(
+        files.iter().any(|f| f.ends_with("a.py")),
+        "focused cluster should involve a.py, got {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.ends_with("c.py") || f.ends_with("d.py")),
+        "c.py/d.py should not appear in a focus on a.py, got {files:?}"
+    );
+}
+
+#[test]
+fn precommit_style_focus_on_clone_free_file_reports_nothing() {
+    // e.py has only one short, structurally unique function — no clones
+    // involve it. `biston scan --focus-args e.py` should exit 0 with an
+    // empty cluster list.
+    let dir = common::multi_file_dir();
+    std::fs::write(
+        dir.path().join("e.py"),
+        "def unique_shape(config):\n    \
+         \"\"\"Structurally unique.\"\"\"\n    \
+         handler = config.handler\n    \
+         token = handler.token()\n    \
+         remaining = handler.quota()\n    \
+         if remaining <= 0:\n        \
+         handler.refresh()\n        \
+         remaining = handler.quota()\n    \
+         handler.commit(token)\n    \
+         return remaining\n",
+    )
+    .expect("write e.py");
+
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["scan", "--focus-args", "--format", "json", "e.py"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "clone-free focus should still exit 0");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(cluster_count(&json), 0, "no clusters involve e.py");
+}
+
+#[test]
+fn precommit_style_empty_focus_exits_zero_with_no_pairs() {
+    // `pre-commit` passes zero positionals when no matching files changed —
+    // the hook must pass silently rather than falling back to a full scan.
+    let dir = common::multi_file_dir();
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["scan", "--focus-args", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "empty focus list must not fail the hook");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(cluster_count(&json), 0);
+}
+
+#[test]
 fn stats_files_flag_restricts_to_focus() {
     let dir = common::multi_file_dir();
     let a_py = dir.path().join("a.py");
