@@ -339,3 +339,91 @@ fn stats_files_flag_restricts_to_focus() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     assert_eq!(json["clone_pairs"].as_u64().unwrap(), 1);
 }
+
+// --- --version / --color / -v / -q / completions tests ---
+
+#[test]
+fn version_flag_prints_pkg_version() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn color_always_emits_ansi() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["--color", "always", "scan", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\x1b["));
+}
+
+#[test]
+fn color_never_suppresses_ansi() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["--color", "never", "scan", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\x1b[").not());
+}
+
+#[test]
+fn no_color_env_suppresses_ansi() {
+    // In --color=auto (the default) mode, NO_COLOR disables color even
+    // if stdout were a TTY. assert_cmd captures stdout, which is not a
+    // TTY — but setting --color=always would normally force colour.
+    // NO_COLOR should not override an explicit --color=always, only auto.
+    Command::cargo_bin("biston")
+        .unwrap()
+        .env("NO_COLOR", "1")
+        .args(["--color", "always", "scan", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\x1b["));
+}
+
+#[test]
+fn no_color_env_suppresses_ansi_in_auto_mode() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .env("NO_COLOR", "1")
+        .args(["scan", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\x1b[").not());
+}
+
+#[test]
+fn verbose_flag_accepted() {
+    Command::cargo_bin("biston").unwrap().args(["-v", "scan", &fixtures_dir()]).assert().success();
+}
+
+#[test]
+fn quiet_flag_accepted() {
+    Command::cargo_bin("biston").unwrap().args(["-q", "scan", &fixtures_dir()]).assert().success();
+}
+
+#[test]
+fn completions_bash_outputs_script() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_biston"));
+}
+
+#[test]
+fn completions_zsh_outputs_script() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#compdef biston"));
+}
