@@ -1,0 +1,19 @@
+- id: biston
+  name: biston clone detection
+  description: Detect code clones involving files changed in this commit
+  entry: biston scan --focus-args
+  language: python
+  types: [python]
+  # require_serial is REQUIRED, not a performance knob.
+  # Without it pre-commit may batch staged files into parallel invocations;
+  # cross-file clones spanning batches would then be silently missed,
+  # which defeats the purpose of running biston as a hook. Do not remove.
+  require_serial: true
+
+- id: biston-stats
+  name: biston clone stats
+  description: Emit clone-pair counts for changed files (for CI gating)
+  entry: biston stats --focus-args --format json
+  language: python
+  types: [python]
+  require_serial: true

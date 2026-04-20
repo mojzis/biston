@@ -1,8 +1,25 @@
 # Commit-hook integration
 
-biston is designed to scan a whole repository, but when you wire it into a pre-commit hook you usually don't want every unrelated pair in the codebase to fail a commit — only clones that involve the files the committer touched. The `--files` / `--files-from` flags narrow the **report** to those files while still scanning the whole tree, so cross-file clones between a changed file and the rest of the repo are still detected.
+biston is designed to scan a whole repository, but when you wire it into a pre-commit hook you usually don't want every unrelated pair in the codebase to fail a commit — only clones that involve the files the committer touched. The `--focus-args` / `--files` / `--files-from` flags narrow the **report** to those files while still scanning the whole tree, so cross-file clones between a changed file and the rest of the repo are still detected.
 
-## The recipe
+## With pre-commit / prek
+
+If you use the [`pre-commit`](https://pre-commit.com) framework (or [`prek`](https://github.com/j178/prek)), drop this into `.pre-commit-config.yaml`:
+
+```yaml
+  - repo: https://github.com/mojzis/biston
+    rev: v0.5.0
+    hooks:
+      - id: biston
+```
+
+That wires up `biston scan --focus-args`, which receives staged Python files as positional arguments and narrows the report to clones involving any of them. An empty staged set (no Python files touched) passes silently. A companion `biston-stats` hook is available for CI gating on pair counts.
+
+> **Heads up:** if you write your own `local` hook definition for biston instead of using the repo above, you **must** set `require_serial: true`. Without it pre-commit may batch staged files into parallel invocations, and cross-file clones spanning batches will be silently missed — defeating the point of running biston as a hook.
+
+## The shell recipe
+
+For raw `.git/hooks/pre-commit` scripts, or for CI integration outside of `pre-commit`:
 
 ```bash
 git diff --name-only --diff-filter=ACM -- '*.py' \
@@ -25,7 +42,11 @@ Given a repo with clones `A ↔ B` (inside the committer's change) and `C ↔ D`
 |---|---|
 | `biston scan .` | `A↔B`, `C↔D` |
 | `biston scan --files A.py .` | `A↔B` (and any `A↔X` with X anywhere in the repo) |
+| `biston scan --focus-args A.py` | `A↔B` (same as `--files A.py .`) |
 | `biston scan --files-from - .` with empty stdin | *(none)* |
+| `biston scan --focus-args` (no positionals) | *(none)* |
+
+The three focus modes — `--files`, `--files-from`, and `--focus-args` — are mutually exclusive; pass only one per invocation.
 
 A focus path that can't be resolved (e.g. a file deleted in the same changeset) is warned about and skipped, not treated as a fatal error — the scan continues with whatever focus paths did resolve.
 
