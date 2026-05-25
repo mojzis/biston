@@ -11,7 +11,7 @@ categories = ["development-tools", "command-line-utilities"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-clap = { version = "4.5", features = ["derive", "color"] }
+clap = { version = "4.6", features = ["derive", "color"] }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -19,15 +19,15 @@ tree-sitter = "0.26"
 tree-sitter-python = "0.25"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rustc-hash = "2.1"
-rayon = "1.10"
+rayon = "1.12"
 ignore = "0.4"
 toml = "0.8"
 glob-match = "0.2.1"
-clap_complete = "4.6.2"
+clap_complete = "4.6.5"
 
 [dev-dependencies]
 tempfile = "3.26"
-assert_cmd = "2.1"
+assert_cmd = "2.2"
 predicates = "3.1"
 
 [lib]
