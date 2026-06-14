@@ -256,12 +256,7 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
 /// nothing to suppress otherwise. The no-clones branch of [`format_text`]
 /// returns early before reaching here.
 fn append_suppression_hint(output: &mut String) {
-    let _ = writeln!(
-        output,
-        "False positive? Add `# biston: ignore` above a function or \
-         `# biston: ignore-file` at the top of a file. Run `biston usage` for \
-         all suppression options."
-    );
+    let _ = writeln!(output, "{}", crate::suppress::suppression_hint());
 }
 
 fn append_suppression_line(stats: &SuppressionStats, output: &mut String) {

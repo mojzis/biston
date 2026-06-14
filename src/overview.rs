@@ -155,6 +155,13 @@ pub fn format_overview_text(
         let _ = writeln!(out, "{dim}{clean_count} clean files not shown.{reset}");
     }
 
+    // Teach the reader how to silence a false positive — only when there's
+    // something to suppress.
+    if !files_with_clones.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{}", crate::suppress::suppression_hint());
+    }
+
     out
 }
 
@@ -463,6 +470,31 @@ mod tests {
         let text = format_overview_text(&overviews, &report, &config);
         assert!(text.contains(RED), "exact clone should use red");
         assert!(text.contains(YELLOW), "non-exact clone should use yellow");
+    }
+
+    #[test]
+    fn text_format_with_clones_mentions_suppression() {
+        let report = make_report(
+            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
+            vec![make_pair(0, 1, 0.95)],
+        );
+        let overviews = compute_overview(&report);
+        let config = OutputConfig { color: false, ..OutputConfig::default() };
+        let text = format_overview_text(&overviews, &report, &config);
+        assert!(text.contains("# biston: ignore"), "hint should show the inline comment");
+        assert!(text.contains("biston usage"), "hint should point at the usage command");
+    }
+
+    #[test]
+    fn text_format_no_clones_omits_suppression_hint() {
+        let report = make_report(
+            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
+            vec![],
+        );
+        let overviews = compute_overview(&report);
+        let config = OutputConfig { color: false, ..OutputConfig::default() };
+        let text = format_overview_text(&overviews, &report, &config);
+        assert!(!text.contains("biston usage"), "no hint when there are no clones");
     }
 
     #[test]

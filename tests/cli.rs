@@ -94,6 +94,17 @@ fn scan_with_clones_mentions_suppression() {
         .stdout(predicate::str::contains("biston usage"));
 }
 
+#[test]
+fn overview_with_clones_mentions_suppression() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["overview", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# biston: ignore"))
+        .stdout(predicate::str::contains("biston usage"));
+}
+
 // --- Scan subcommand tests ---
 
 #[test]

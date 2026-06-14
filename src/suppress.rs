@@ -46,6 +46,17 @@ summary line, so nothing disappears silently.
 "
 }
 
+/// One-line reminder shown at the foot of any report that surfaces clones.
+///
+/// Points readers at the inline-comment suppressions and the fuller
+/// [`suppression_help`] reachable via `biston usage`. Returned without a
+/// trailing newline so each formatter controls its own spacing.
+pub fn suppression_hint() -> &'static str {
+    "False positive? Add `# biston: ignore` above a function or \
+     `# biston: ignore-file` at the top of a file. Run `biston usage` for \
+     all suppression options."
+}
+
 /// Returns true if the file matches any suppress glob pattern in the config.
 pub fn file_suppressed_by_config(path: &Path, root: &Path, config: &SuppressConfig) -> bool {
     matches_any_glob(path, root, &config.files)
@@ -106,6 +117,16 @@ mod tests {
         assert!(help.contains("# biston: ignore"), "should document the function comment");
         assert!(help.contains("[suppress]"), "should document the config glob section");
         assert!(help.contains("files"), "should mention the config `files` key");
+    }
+
+    // --- suppression_hint ---
+
+    #[test]
+    fn hint_points_at_inline_comment_and_usage_command() {
+        let hint = suppression_hint();
+        assert!(hint.contains("# biston: ignore"), "hint should show the inline comment");
+        assert!(hint.contains("biston usage"), "hint should point at the usage command");
+        assert!(!hint.contains('\n'), "hint is a single line; callers add the newline");
     }
 
     // --- file_suppressed_by_config ---
