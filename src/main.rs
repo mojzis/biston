@@ -217,6 +217,9 @@ enum Commands {
         common: CommonOpts,
     },
 
+    /// Explain how to suppress findings (inline comments and config globs)
+    Usage,
+
     /// Print a shell completion script to stdout
     Completions {
         /// Shell to generate completions for
@@ -320,6 +323,10 @@ fn main() -> anyhow::Result<()> {
 
             print!("{output}");
 
+            Ok(())
+        }
+        Commands::Usage => {
+            print!("{}", biston::suppress::suppression_help());
             Ok(())
         }
         Commands::Completions { shell } => {

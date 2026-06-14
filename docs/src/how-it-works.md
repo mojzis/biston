@@ -154,7 +154,7 @@ The `stats` subcommand shares the pipeline but emits aggregate counts instead of
 
 ## Configuration & suppression
 
-Config lives in `biston.toml` or under `[tool.biston]` in `pyproject.toml`. CLI flags override config values. File-level and function-level suppression is available via config globs or inline `# biston: ignore` / `# biston: ignore-file` comments. The full key-by-key reference lives in the [project README](https://github.com/mojzis/biston#configuration).
+Config lives in `biston.toml` or under `[tool.biston]` in `pyproject.toml`. CLI flags override config values. File-level and function-level suppression is available via config globs or inline `# biston: ignore` / `# biston: ignore-file` comments. Run `biston usage` for an at-a-glance reference of every suppression mechanism — the same reminder is printed at the foot of any scan that reports clones. The full key-by-key reference lives in the [project README](https://github.com/mojzis/biston#configuration).
 
 ## Scanning tests
 

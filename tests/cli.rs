@@ -69,6 +69,31 @@ fn stats_json_contains_expected_fields() {
     assert!(json["breakdown"].is_object());
 }
 
+// --- Usage subcommand tests ---
+
+#[test]
+fn usage_command_explains_inline_comments() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# biston: ignore-file"))
+        .stdout(predicate::str::contains("# biston: ignore"))
+        .stdout(predicate::str::contains("[suppress]"));
+}
+
+#[test]
+fn scan_with_clones_mentions_suppression() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# biston: ignore"))
+        .stdout(predicate::str::contains("biston usage"));
+}
+
 // --- Scan subcommand tests ---
 
 #[test]
