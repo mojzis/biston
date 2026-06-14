@@ -244,9 +244,19 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
         let _ = writeln!(output);
     }
 
+    append_suppression_hint(&mut output);
     append_suppression_line(&report.suppression_stats, &mut output);
 
     output
+}
+
+/// Teach the reader how to silence a false positive.
+///
+/// Precondition: only call this when at least one clone was found — there's
+/// nothing to suppress otherwise. The no-clones branch of [`format_text`]
+/// returns early before reaching here.
+fn append_suppression_hint(output: &mut String) {
+    let _ = writeln!(output, "{}", crate::suppress::suppression_hint());
 }
 
 fn append_suppression_line(stats: &SuppressionStats, output: &mut String) {
@@ -538,6 +548,44 @@ mod tests {
         assert!(text.contains("0.95"));
         assert!(text.contains("foo"));
         assert!(text.contains("bar"));
+    }
+
+    #[test]
+    fn text_format_with_clones_mentions_suppression() {
+        let report = CloneReport {
+            files_scanned: 2,
+            functions: vec![
+                make_func("foo", "src/a.py", 0, 10),
+                make_func("bar", "src/b.py", 5, 15),
+            ],
+            normalized: vec![],
+            pairs: vec![make_pair(0, 1, 0.95)],
+            suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
+        };
+        let config = OutputConfig { show_source: false, ..OutputConfig::default() };
+        let text = format_text(&report, &config);
+        // Guard the precondition: the hint is only valid alongside a finding.
+        assert!(text.contains("Clone cluster #1"), "report should contain a finding");
+        // Findings should teach the reader how to silence a false positive.
+        assert!(text.contains("# biston: ignore"), "hint should show the inline comment");
+        assert!(text.contains("biston usage"), "hint should point at the usage command");
+    }
+
+    #[test]
+    fn text_format_no_clones_omits_suppression_hint() {
+        let report = CloneReport {
+            files_scanned: 1,
+            functions: vec![],
+            normalized: vec![],
+            pairs: vec![],
+            suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
+        };
+        let config = OutputConfig::default();
+        let text = format_text(&report, &config);
+        // No findings means nothing to suppress — keep the output quiet.
+        assert!(!text.contains("biston usage"), "no hint when there are no clones");
     }
 
     #[test]

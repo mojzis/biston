@@ -172,6 +172,13 @@ You can also suppress findings with Python comments:
 - `# biston: ignore-file` — suppress the entire file (must appear in the first 5 lines)
 - `# biston: ignore` — suppress a single function (place in the function body or on the preceding line)
 
+When `scan` or `overview` reports clones, the text output ends with a one-line
+reminder of these options. Run `biston usage` for the full reference at any time:
+
+```
+biston usage
+```
+
 ## Documentation
 
 Full docs at <https://mojzis.github.io/biston/>.

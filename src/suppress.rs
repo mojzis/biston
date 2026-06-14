@@ -14,6 +14,49 @@ pub struct SuppressionStats {
     pub inline_functions: usize,
 }
 
+/// Human-readable reference for every way to suppress a biston finding.
+///
+/// This is the single source of truth shared by the `biston usage` subcommand
+/// and (in condensed form) the scan report's suppression hint, so anyone —
+/// human or coding agent — reading a clone report can discover how to silence
+/// a false positive without leaving the terminal.
+pub fn suppression_help() -> &'static str {
+    "\
+biston: how to suppress a finding
+=================================
+
+Inline comments (in your Python source) — preferred for one-off cases:
+
+  # biston: ignore-file
+      Suppress the entire file. Must appear within the first 5 lines.
+
+  # biston: ignore
+      Suppress a single function. Place it inside the function body, or on
+      the line immediately before the `def` / `async def`.
+
+Config file (biston.toml, or [tool.biston] in pyproject.toml) — for whole
+directories of generated or vendored code:
+
+  [suppress]
+  files = [\"generated/**\", \"migrations/**\"]
+      Suppress every file matching these glob patterns.
+
+Suppressed findings are still counted and reported in the \"Suppressed:\"
+summary line, so nothing disappears silently.
+"
+}
+
+/// One-line reminder shown at the foot of any report that surfaces clones.
+///
+/// Points readers at the inline-comment suppressions and the fuller
+/// [`suppression_help`] reachable via `biston usage`. Returned without a
+/// trailing newline so each formatter controls its own spacing.
+pub fn suppression_hint() -> &'static str {
+    "False positive? Add `# biston: ignore` above a function or \
+     `# biston: ignore-file` at the top of a file. Run `biston usage` for \
+     all suppression options."
+}
+
 /// Returns true if the file matches any suppress glob pattern in the config.
 pub fn file_suppressed_by_config(path: &Path, root: &Path, config: &SuppressConfig) -> bool {
     matches_any_glob(path, root, &config.files)
@@ -64,6 +107,27 @@ fn has_ignore_not_ignore_file(text: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // --- suppression_help ---
+
+    #[test]
+    fn help_documents_every_suppression_mechanism() {
+        let help = suppression_help();
+        assert!(help.contains("# biston: ignore-file"), "should document the file comment");
+        assert!(help.contains("# biston: ignore"), "should document the function comment");
+        assert!(help.contains("[suppress]"), "should document the config glob section");
+        assert!(help.contains("files"), "should mention the config `files` key");
+    }
+
+    // --- suppression_hint ---
+
+    #[test]
+    fn hint_points_at_inline_comment_and_usage_command() {
+        let hint = suppression_hint();
+        assert!(hint.contains("# biston: ignore"), "hint should show the inline comment");
+        assert!(hint.contains("biston usage"), "hint should point at the usage command");
+        assert!(!hint.contains('\n'), "hint is a single line; callers add the newline");
+    }
 
     // --- file_suppressed_by_config ---
 
