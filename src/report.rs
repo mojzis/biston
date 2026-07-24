@@ -362,7 +362,7 @@ struct JsonContainment {
     start_line: usize,
     /// Last line of the run within the container (1-indexed, inclusive).
     end_line: usize,
-    /// Top-level statements the run spans.
+    /// Executable top-level statements the run spans (docstrings/comments excluded).
     statement_count: usize,
     /// Containment coefficient, `|A ∩ F| / min(|A|, |F|)`.
     score: f64,

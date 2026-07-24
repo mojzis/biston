@@ -175,6 +175,44 @@ fn stats_counts_containment_separately_from_clone_pairs() {
 }
 
 #[test]
+fn overview_with_containment_never_calls_a_file_with_findings_clean() {
+    // `--containment` reaches `overview` too, and supersession removes the symmetric
+    // pair. If overview does not render containment, the flag *deletes* the finding
+    // and then reports the file as clean — strictly worse than not supporting it.
+    let dir = containment_dir();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["overview", "--containment", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already-implemented runs"))
+        .stdout(predicate::str::contains("already implemented by normalize_records"))
+        .stdout(predicate::str::contains("clean files not shown").not());
+}
+
+#[test]
+fn overview_containment_json_counts_findings() {
+    let dir = containment_dir();
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .args(["overview", "--containment", "--format", "json", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["summary"]["containment_findings"], 1, "got: {parsed}");
+    let total: u64 = parsed["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["containment_count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(total, 2, "both sides of the finding should be marked: {parsed}");
+}
+
+#[test]
 fn scan_containment_json_declares_schema_version_two() {
     let dir = containment_dir();
     let output = Command::cargo_bin("biston")

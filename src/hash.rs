@@ -71,7 +71,7 @@ pub fn hash_function(
 ///
 /// Returns `false` when the function has no `block` child at all — a shape that
 /// carries no logic either way.
-pub fn has_executable_body(normalized: &NormalizedNode) -> bool {
+fn has_executable_body(normalized: &NormalizedNode) -> bool {
     normalized
         .children
         .iter()
@@ -80,8 +80,7 @@ pub fn has_executable_body(normalized: &NormalizedNode) -> bool {
 }
 
 /// Whether a body statement does nothing observable.
-#[must_use]
-pub fn is_inert_statement(stmt: &NormalizedNode) -> bool {
+pub(crate) fn is_inert_statement(stmt: &NormalizedNode) -> bool {
     if INERT_STATEMENT_KINDS.contains(&stmt.kind) {
         return true;
     }
@@ -93,7 +92,7 @@ pub fn is_inert_statement(stmt: &NormalizedNode) -> bool {
 /// The top-level statements of a normalized function body.
 ///
 /// Empty when the function has no `block` child.
-pub fn body_statements(normalized: &NormalizedNode) -> &[NormalizedNode] {
+pub(crate) fn body_statements(normalized: &NormalizedNode) -> &[NormalizedNode] {
     normalized
         .children
         .iter()
@@ -130,8 +129,15 @@ impl Remap {
         if !text.starts_with('$') {
             return None;
         }
+        // Look up before inserting: `entry` needs an owned key, so going straight
+        // to it would allocate a String on every *occurrence* of every placeholder,
+        // not just the first.
+        if let Some(&index) = self.indices.get(text) {
+            return Some(index);
+        }
         let next = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
-        Some(*self.indices.entry(text.to_owned()).or_insert(next))
+        self.indices.insert(text.to_owned(), next);
+        Some(next)
     }
 }
 
@@ -142,7 +148,7 @@ impl Remap {
 /// enclosing function. Comparing two such fingerprints is therefore meaningful in
 /// both directions; comparing one against a whole-function [`HashedFunction`]
 /// fingerprint is **not**, because those use function-relative numbering.
-pub fn hash_statement_run(
+pub(crate) fn hash_statement_run(
     statements: &[NormalizedNode],
     min_subtree_nodes: usize,
     sort_commutative: bool,
@@ -259,6 +265,73 @@ mod tests {
 
     fn node(kind: &'static str, children: Vec<NormalizedNode>) -> NormalizedNode {
         NormalizedNode { kind, text: None, children, byte_range: None }
+    }
+
+    /// Two statements shaped like `$a = f($b)` / `$b = g($a, $b)`, using the given
+    /// placeholder numbers. Big enough for the `min_nodes` floor to admit subtrees.
+    fn statement_run(first: &str, second: &str) -> Vec<NormalizedNode> {
+        let assign = |target: &str, func: &str, args: Vec<&str>| {
+            node(
+                "expression_statement",
+                vec![node(
+                    "assignment",
+                    vec![
+                        leaf("identifier", target),
+                        node(
+                            "call",
+                            vec![
+                                leaf("identifier", func),
+                                node(
+                                    "argument_list",
+                                    args.into_iter().map(|a| leaf("identifier", a)).collect(),
+                                ),
+                            ],
+                        ),
+                    ],
+                )],
+            )
+        };
+        vec![assign(first, "f", vec![second]), assign(second, "g", vec![first, second])]
+    }
+
+    // --- Run-relative renumbering ---
+
+    #[test]
+    fn run_fingerprint_is_invariant_under_placeholder_shift() {
+        // The same code preceded by different statements gets different placeholder
+        // numbers from normalization. A run's fingerprint must not depend on that,
+        // or a trailing run can never match the standalone function containing it.
+        let low = hash_statement_run(&statement_run("$0", "$1"), 5, false);
+        let shifted = hash_statement_run(&statement_run("$3", "$4"), 5, false);
+        assert!(!low.is_empty(), "fixture must produce a non-empty fingerprint");
+        assert_eq!(low, shifted, "run fingerprint must not depend on absolute placeholder numbers");
+    }
+
+    #[test]
+    fn run_fingerprint_still_distinguishes_a_different_reuse_pattern() {
+        // Renumbering must not go so far as to erase *which* variable is which:
+        // `$a = f($b)` and `$a = f($a)` are different code.
+        let distinct = hash_statement_run(&statement_run("$0", "$1"), 5, false);
+        let same_variable = hash_statement_run(&statement_run("$0", "$0"), 5, false);
+        assert_ne!(distinct, same_variable, "reuse pattern must survive renumbering");
+    }
+
+    #[test]
+    fn whole_function_hashing_is_unaffected_by_the_remap() {
+        // `hash_function` passes `None`, so absolute placeholder numbers still matter
+        // there — that path must stay bit-for-bit as it was.
+        let build = |a: &str, b: &str| {
+            node(
+                "function_definition",
+                vec![leaf("identifier", "<fn>"), node("block", statement_run(a, b))],
+            )
+        };
+        let low = hash_function(&build("$0", "$1"), 0, 5, false);
+        let shifted = hash_function(&build("$3", "$4"), 0, 5, false);
+        assert_ne!(
+            low.root_hash, shifted.root_hash,
+            "whole-function hashing must not silently acquire run-relative behaviour"
+        );
     }
 
     #[test]

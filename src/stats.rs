@@ -18,6 +18,10 @@ pub struct ScanStats {
     /// Deliberately excludes containment findings, which are counted separately by
     /// `containment_findings`. Existing CI gates read this field, so folding a new
     /// kind of finding into it would silently change what they enforce.
+    ///
+    /// Enabling containment does still *reduce* this count, by the number of pairs
+    /// superseded by a directed finding for the same two functions. That direction is
+    /// safe for a gate — it never reports more than before — but it is not zero.
     pub clone_pairs: usize,
     /// Number of directed containment findings.
     ///

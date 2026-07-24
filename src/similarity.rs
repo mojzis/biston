@@ -160,26 +160,10 @@ impl LshIndex {
     }
 
     /// Report index pressure at debug level.
-    ///
-    /// Occupancy is the number that matters for cost: a bucket holding `n` entries
-    /// contributes `n*(n-1)/2` candidate pairs, so the fat tail dominates.
     fn log_occupancy(&self) {
-        if !tracing::enabled!(tracing::Level::DEBUG) {
-            return;
-        }
-        let mut sizes: Vec<usize> =
-            self.buckets.iter().flat_map(|band| band.values().map(Vec::len)).collect();
-        if sizes.is_empty() {
-            return;
-        }
-        sizes.sort_unstable();
-        tracing::debug!(
-            "similarity index: {} entries in {} buckets, p99 occupancy {}, max {}",
-            sizes.iter().sum::<usize>(),
-            sizes.len(),
-            sizes[sizes.len() * 99 / 100],
-            sizes.last().copied().unwrap_or(0),
-        );
+        log_index_occupancy("similarity", || {
+            self.buckets.iter().flat_map(|band| band.values().map(Vec::len)).collect()
+        });
     }
 
     /// Get all candidate pairs (deduplicated).
@@ -204,6 +188,29 @@ impl LshIndex {
         }
         pairs
     }
+}
+
+/// Report an LSH index's bucket occupancy at debug level.
+///
+/// Occupancy is the number that matters for cost: a bucket holding `n` entries
+/// contributes `n*(n-1)/2` candidate pairs, so the fat tail dominates. `sizes` is a
+/// closure so the collection is skipped entirely when debug logging is off.
+pub(crate) fn log_index_occupancy(label: &str, sizes: impl FnOnce() -> Vec<usize>) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let mut sizes = sizes();
+    if sizes.is_empty() {
+        return;
+    }
+    sizes.sort_unstable();
+    tracing::debug!(
+        "{label} index: {} entries in {} buckets, p99 occupancy {}, max {}",
+        sizes.iter().sum::<usize>(),
+        sizes.len(),
+        sizes[sizes.len() * 99 / 100],
+        sizes.last().copied().unwrap_or(0),
+    );
 }
 
 /// Hash a band (slice of minhash values) into a single u64.
