@@ -44,10 +44,15 @@ def _find_biston_binary() -> str:
     """Locate the biston binary.
 
     Search order:
+    0. ``$BISTON_BIN``  (explicit override, for A/B benchmarking two builds)
     1. ``target/release/biston``  (relative to repo root)
     2. ``target/debug/biston``
     3. ``biston`` on PATH
     """
+    override = os.environ.get("BISTON_BIN")
+    if override:
+        return override
+
     repo_root = Path(__file__).resolve().parent.parent
 
     for subpath in ("target/release/biston", "target/debug/biston"):
@@ -63,6 +68,23 @@ def _find_biston_binary() -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+# biston's default ``[output] max_results`` is 50, which silently truncates the
+# cluster list.  Truncated output caps recall at an arbitrary ceiling and makes the
+# benchmark useless as a regression gate, so the harness writes a config raising it.
+_MAX_RESULTS = 1_000_000
+
+
+def _write_bench_config(corpus_dir: Path) -> None:
+    """Write a ``biston.toml`` into *corpus_dir* so results are not truncated.
+
+    ``--config`` defaults to the scan path, so a config placed here is picked up.
+    Only ``max_results`` is set; every other knob keeps its default.
+    """
+    (corpus_dir / "biston.toml").write_text(
+        f"[output]\nmax_results = {_MAX_RESULTS}\n", encoding="utf-8"
+    )
+
+
 def run_biston(
     corpus_dir: Path,
     *,
@@ -74,6 +96,7 @@ def run_biston(
     Uses a lower threshold and min-lines than biston's defaults to
     maximize recall for benchmarking.
     """
+    _write_bench_config(corpus_dir)
     binary = _find_biston_binary()
     cmd = [
         binary,

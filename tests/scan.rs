@@ -35,6 +35,29 @@ fn detects_simple_clones() {
 }
 
 #[test]
+fn docstring_only_functions_are_not_reported_as_clones() {
+    // All three bodies normalize identically (a childless `docstring` node), so
+    // exact root-hash matching would pair every one of them at similarity 1.0.
+    // There is no logic in them to extract, so none of it is worth reporting.
+    let config = config_for_file("docstring_only.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert_eq!(report.functions.len(), 3, "fixture should yield three functions");
+    assert!(
+        report.pairs.is_empty(),
+        "expected no pairs, got {:?}",
+        report
+            .pairs
+            .iter()
+            .map(|p| (
+                report.functions[p.left].name.as_str(),
+                report.functions[p.right].name.as_str(),
+                p.similarity
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn detects_near_miss() {
     let config = config_for_file("near_miss.py");
     let report = biston::scan(&fixtures_path(), &config).unwrap();

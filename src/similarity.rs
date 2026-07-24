@@ -24,34 +24,50 @@ pub fn find_similar_functions(functions: &[HashedFunction], threshold: f64) -> V
         return vec![];
     }
 
+    // Two independent degeneracy filters, applied before *either* phase.
+    //
+    // `has_executable_body`: a body of only docstrings, `pass`, `...` or comments
+    // normalizes to the same tree as every other such body, so exact root-hash
+    // matching pairs them all at 1.0. On CPython's `Lib/` that collapses 119
+    // unrelated doctest functions into one cluster — 7021 of 14389 reported pairs.
+    //
+    // `!subtree_hashes.is_empty()`: `minhash_signature` maps the empty set to
+    // all-`u64::MAX`, which collides in *every* band, so each such function would
+    // become a candidate against every other one — quadratic work for pairs with
+    // nothing to compare.
+    let reportable: Vec<&HashedFunction> = functions
+        .iter()
+        .filter(|f| f.has_executable_body && !f.subtree_hashes.is_empty())
+        .collect();
+    if reportable.is_empty() {
+        return vec![];
+    }
+
     // Phase 1: exact matches
     let mut exact_pairs: FxHashSet<(usize, usize)> = FxHashSet::default();
-    let mut pairs = find_exact_matches(functions);
+    let mut pairs = find_exact_matches(&reportable);
     for p in &pairs {
         let key = if p.left < p.right { (p.left, p.right) } else { (p.right, p.left) };
         exact_pairs.insert(key);
     }
 
     // Phase 2: near-miss detection via minhash + LSH
-    let signatures: Vec<MinHashSignature> =
-        functions.iter().map(|f| minhash_signature(&f.subtree_hashes)).collect();
-
     let (bands, rows) = lsh_params_for_threshold(threshold);
     let mut lsh = LshIndex::new(bands, rows);
-    for (i, sig) in signatures.iter().enumerate() {
-        lsh.insert(i, sig);
+    for (i, func) in reportable.iter().enumerate() {
+        lsh.insert(i, &minhash_signature(&func.subtree_hashes));
     }
 
     let candidates = lsh.candidates();
     for (i, j) in candidates {
-        let fi = functions[i].fragment_index;
-        let fj = functions[j].fragment_index;
+        let fi = reportable[i].fragment_index;
+        let fj = reportable[j].fragment_index;
         let key = if fi < fj { (fi, fj) } else { (fj, fi) };
         if exact_pairs.contains(&key) {
             continue;
         }
 
-        let sim = jaccard_similarity(&functions[i].subtree_hashes, &functions[j].subtree_hashes);
+        let sim = jaccard_similarity(&reportable[i].subtree_hashes, &reportable[j].subtree_hashes);
         if sim >= threshold {
             pairs.push(SimilarPair { left: key.0, right: key.1, similarity: sim });
         }
@@ -70,7 +86,9 @@ pub fn find_similar_functions(functions: &[HashedFunction], threshold: f64) -> V
 }
 
 /// Find exact matches by grouping functions with identical root hashes.
-pub(crate) fn find_exact_matches(functions: &[HashedFunction]) -> Vec<SimilarPair> {
+///
+/// Takes a slice of references so callers can pre-filter without cloning.
+pub(crate) fn find_exact_matches(functions: &[&HashedFunction]) -> Vec<SimilarPair> {
     let mut groups: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
 
     for func in functions {
@@ -173,16 +191,17 @@ fn hash_band(values: &[u64]) -> u64 {
 }
 
 /// Compute exact Jaccard similarity between two sets.
+///
+/// Two empty fingerprints score `0.0`, not `1.0`. An empty fingerprint means the
+/// function had no subtree large enough to qualify, so there is no evidence of
+/// similarity to report — scoring it a perfect match turns absence of data into a
+/// clone claim.
 pub(crate) fn jaccard_similarity(a: &FxHashSet<u64>, b: &FxHashSet<u64>) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-
     let intersection = a.intersection(b).count();
     let union = a.len() + b.len() - intersection;
 
     if union == 0 {
-        return 1.0;
+        return 0.0;
     }
 
     intersection as f64 / union as f64
@@ -210,7 +229,12 @@ mod tests {
     use super::*;
 
     fn make_hashed(index: usize, root_hash: u64) -> HashedFunction {
-        HashedFunction { fragment_index: index, root_hash, subtree_hashes: FxHashSet::default() }
+        HashedFunction {
+            fragment_index: index,
+            root_hash,
+            subtree_hashes: FxHashSet::default(),
+            has_executable_body: true,
+        }
     }
 
     fn make_hashed_with_subtrees(index: usize, root_hash: u64, subtrees: &[u64]) -> HashedFunction {
@@ -218,6 +242,15 @@ mod tests {
             fragment_index: index,
             root_hash,
             subtree_hashes: subtrees.iter().copied().collect(),
+            has_executable_body: true,
+        }
+    }
+
+    /// A function whose body holds nothing but a docstring, `pass` or comments.
+    fn make_inert(index: usize, root_hash: u64, subtrees: &[u64]) -> HashedFunction {
+        HashedFunction {
+            has_executable_body: false,
+            ..make_hashed_with_subtrees(index, root_hash, subtrees)
         }
     }
 
@@ -225,8 +258,9 @@ mod tests {
 
     #[test]
     fn two_identical_functions_detected() {
-        let funcs = vec![make_hashed(0, 100), make_hashed(1, 100)];
-        let pairs = find_exact_matches(&funcs);
+        let funcs = [make_hashed(0, 100), make_hashed(1, 100)];
+        let refs: Vec<&HashedFunction> = funcs.iter().collect();
+        let pairs = find_exact_matches(&refs);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].left, 0);
         assert_eq!(pairs[0].right, 1);
@@ -235,27 +269,26 @@ mod tests {
 
     #[test]
     fn three_identical_functions_detected() {
-        let funcs = vec![make_hashed(0, 100), make_hashed(1, 100), make_hashed(2, 100)];
-        let pairs = find_exact_matches(&funcs);
+        let funcs = [make_hashed(0, 100), make_hashed(1, 100), make_hashed(2, 100)];
+        let refs: Vec<&HashedFunction> = funcs.iter().collect();
+        let pairs = find_exact_matches(&refs);
         assert_eq!(pairs.len(), 3);
     }
 
     #[test]
     fn no_matches_when_all_unique() {
-        let funcs = vec![make_hashed(0, 100), make_hashed(1, 200), make_hashed(2, 300)];
-        let pairs = find_exact_matches(&funcs);
+        let funcs = [make_hashed(0, 100), make_hashed(1, 200), make_hashed(2, 300)];
+        let refs: Vec<&HashedFunction> = funcs.iter().collect();
+        let pairs = find_exact_matches(&refs);
         assert!(pairs.is_empty());
     }
 
     #[test]
     fn multiple_groups() {
-        let funcs = vec![
-            make_hashed(0, 100),
-            make_hashed(1, 100),
-            make_hashed(2, 200),
-            make_hashed(3, 200),
-        ];
-        let pairs = find_exact_matches(&funcs);
+        let funcs =
+            [make_hashed(0, 100), make_hashed(1, 100), make_hashed(2, 200), make_hashed(3, 200)];
+        let refs: Vec<&HashedFunction> = funcs.iter().collect();
+        let pairs = find_exact_matches(&refs);
         assert_eq!(pairs.len(), 2);
     }
 
@@ -378,17 +411,106 @@ mod tests {
     }
 
     #[test]
-    fn jaccard_both_empty() {
+    fn jaccard_both_empty_is_zero() {
+        // Two functions with no qualifying subtrees share no structural evidence.
+        // Scoring that 1.0 turns an absence of data into a perfect-clone claim.
         let a: FxHashSet<u64> = FxHashSet::default();
         let b: FxHashSet<u64> = FxHashSet::default();
-        assert!((jaccard_similarity(&a, &b) - 1.0).abs() < f64::EPSILON);
+        assert!(jaccard_similarity(&a, &b).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn jaccard_one_empty_is_zero() {
+        let a: FxHashSet<u64> = FxHashSet::default();
+        let b: FxHashSet<u64> = (0..10).collect();
+        assert!(jaccard_similarity(&a, &b).abs() < f64::EPSILON);
+        assert!(jaccard_similarity(&b, &a).abs() < f64::EPSILON);
+    }
+
+    // --- Degeneracy tests ---
+
+    #[test]
+    fn degenerate_fingerprints_are_not_near_miss_pairs() {
+        // Distinct root hashes, both fingerprints empty: nothing to compare.
+        let funcs =
+            vec![make_hashed_with_subtrees(0, 1, &[]), make_hashed_with_subtrees(1, 2, &[])];
+        let pairs = find_similar_functions(&funcs, 0.7);
+        assert!(pairs.is_empty(), "empty fingerprints must not pair: {pairs:?}");
+    }
+
+    #[test]
+    fn degenerate_fingerprints_do_not_blow_up_quadratically() {
+        // An all-`u64::MAX` signature collides in every band with every other
+        // such signature, so N degenerate functions would yield N*(N-1)/2 pairs.
+        let funcs: Vec<_> =
+            (0..30).map(|i| make_hashed_with_subtrees(i, i as u64 + 1, &[])).collect();
+        let pairs = find_similar_functions(&funcs, 0.7);
+        assert!(pairs.is_empty(), "expected 0 pairs, got {}", pairs.len());
+    }
+
+    #[test]
+    fn degenerate_fingerprints_are_not_reported_even_when_root_hashes_match() {
+        // Identical root hashes with an empty fingerprint: the exact phase must be
+        // filtered too, not only the LSH phase.
+        let funcs =
+            vec![make_hashed_with_subtrees(0, 100, &[]), make_hashed_with_subtrees(1, 100, &[])];
+        let pairs = find_similar_functions(&funcs, 0.7);
+        assert!(pairs.is_empty(), "expected 0 pairs, got {pairs:?}");
+    }
+
+    #[test]
+    fn inert_bodies_are_not_reported_despite_a_matching_fingerprint() {
+        // This is the docstring-only shape as it actually occurs: the fingerprint is
+        // non-empty (one hash of the function outline) and the root hashes are equal,
+        // so both the exact and the near-miss phase would happily pair them.
+        let funcs = vec![make_inert(0, 100, &[7]), make_inert(1, 100, &[7])];
+        let pairs = find_similar_functions(&funcs, 0.7);
+        assert!(pairs.is_empty(), "expected 0 pairs, got {pairs:?}");
+    }
+
+    #[test]
+    fn inert_body_does_not_drag_in_a_function_with_real_logic() {
+        let subtrees: Vec<u64> = (0..40).collect();
+        let funcs = vec![
+            make_inert(0, 100, &subtrees),
+            make_hashed_with_subtrees(1, 100, &subtrees),
+            make_hashed_with_subtrees(2, 100, &subtrees),
+        ];
+        let pairs = find_similar_functions(&funcs, 0.7);
+        assert_eq!(pairs.len(), 1, "only the two executable functions may pair: {pairs:?}");
+        assert_eq!((pairs[0].left, pairs[0].right), (1, 2));
+    }
+
+    #[test]
+    fn find_exact_matches_itself_stays_a_pure_grouping_primitive() {
+        // The reportability filter lives in `find_similar_functions`, so this
+        // low-level helper must still group purely by root hash.
+        let funcs = [make_hashed(0, 100), make_hashed(1, 100)];
+        let refs: Vec<&HashedFunction> = funcs.iter().collect();
+        assert_eq!(find_exact_matches(&refs).len(), 1);
+    }
+
+    #[test]
+    fn degenerate_fingerprint_does_not_drag_in_a_real_one() {
+        let funcs = vec![
+            make_hashed_with_subtrees(0, 1, &[]),
+            make_hashed_with_subtrees(1, 2, &(0..100).collect::<Vec<_>>()),
+        ];
+        let pairs = find_similar_functions(&funcs, 0.7);
+        assert!(pairs.is_empty(), "expected 0 pairs, got {pairs:?}");
     }
 
     // --- Full pipeline tests ---
 
     #[test]
     fn full_pipeline_includes_exact_matches() {
-        let funcs = vec![make_hashed(0, 100), make_hashed(1, 100)];
+        // Fingerprints must be non-empty: the pipeline drops functions with no
+        // qualifying subtree before either phase runs.
+        let subtrees: Vec<u64> = (0..20).collect();
+        let funcs = vec![
+            make_hashed_with_subtrees(0, 100, &subtrees),
+            make_hashed_with_subtrees(1, 100, &subtrees),
+        ];
         let pairs = find_similar_functions(&funcs, 0.7);
         assert_eq!(pairs.len(), 1);
         assert!((pairs[0].similarity - 1.0).abs() < f64::EPSILON);

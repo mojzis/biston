@@ -14,7 +14,21 @@ pub struct HashedFunction {
     /// below it. A leaf change propagates at most that many levels up, avoiding
     /// the cascade problem where a single change invalidates every ancestor hash.
     pub subtree_hashes: FxHashSet<u64>,
+    /// Whether the body holds at least one statement that actually does something.
+    ///
+    /// A body made up only of a docstring, `pass`, `...` or comments normalizes to
+    /// the *same* tree as every other such body — the prose is stripped, so nothing
+    /// distinguishes them. Their fingerprint is a single hash of the function
+    /// outline, and their root hashes are equal, so clone detection pairs them all
+    /// at 1.0. There is no logic in them to extract, so they are not reportable.
+    pub has_executable_body: bool,
 }
+
+/// Statement kinds that carry no executable logic.
+///
+/// `docstring` and `comment` are synthesized by normalization, which strips their
+/// text; `pass_statement` is a no-op by definition.
+const INERT_STATEMENT_KINDS: &[&str] = &["docstring", "comment", "pass_statement"];
 
 /// Node kinds where child order is irrelevant for clone detection.
 const COMMUTATIVE_KINDS: &[&str] = &["binary_operator", "boolean_operator"];
@@ -45,7 +59,34 @@ pub fn hash_function(
     let mut subtree_hashes = FxHashSet::default();
     let (root_hash, _depth_hashes, _count) =
         hash_node(normalized, min_subtree_nodes, sort_commutative, &mut subtree_hashes);
-    HashedFunction { fragment_index, root_hash, subtree_hashes }
+    HashedFunction {
+        fragment_index,
+        root_hash,
+        subtree_hashes,
+        has_executable_body: has_executable_body(normalized),
+    }
+}
+
+/// Whether a normalized function's body holds at least one executable statement.
+///
+/// Returns `false` when the function has no `block` child at all — a shape that
+/// carries no logic either way.
+pub fn has_executable_body(normalized: &NormalizedNode) -> bool {
+    normalized
+        .children
+        .iter()
+        .find(|child| child.kind == "block")
+        .is_some_and(|block| block.children.iter().any(|stmt| !is_inert_statement(stmt)))
+}
+
+/// Whether a body statement does nothing observable.
+fn is_inert_statement(stmt: &NormalizedNode) -> bool {
+    if INERT_STATEMENT_KINDS.contains(&stmt.kind) {
+        return true;
+    }
+    // A bare `...` or string expression evaluates to a discarded value.
+    stmt.kind == "expression_statement"
+        && stmt.children.iter().all(|child| matches!(child.kind, "ellipsis" | "string"))
 }
 
 /// Compute a hash from kind + separator, with no child information.
