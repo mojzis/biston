@@ -58,6 +58,8 @@ pub fn find_similar_functions(functions: &[HashedFunction], threshold: f64) -> V
         lsh.insert(i, &minhash_signature(&func.subtree_hashes));
     }
 
+    lsh.log_occupancy();
+
     let candidates = lsh.candidates();
     for (i, j) in candidates {
         let fi = reportable[i].fragment_index;
@@ -157,6 +159,29 @@ impl LshIndex {
         }
     }
 
+    /// Report index pressure at debug level.
+    ///
+    /// Occupancy is the number that matters for cost: a bucket holding `n` entries
+    /// contributes `n*(n-1)/2` candidate pairs, so the fat tail dominates.
+    fn log_occupancy(&self) {
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        let mut sizes: Vec<usize> =
+            self.buckets.iter().flat_map(|band| band.values().map(Vec::len)).collect();
+        if sizes.is_empty() {
+            return;
+        }
+        sizes.sort_unstable();
+        tracing::debug!(
+            "similarity index: {} entries in {} buckets, p99 occupancy {}, max {}",
+            sizes.iter().sum::<usize>(),
+            sizes.len(),
+            sizes[sizes.len() * 99 / 100],
+            sizes.last().copied().unwrap_or(0),
+        );
+    }
+
     /// Get all candidate pairs (deduplicated).
     fn candidates(&self) -> FxHashSet<(usize, usize)> {
         let mut pairs = FxHashSet::default();
@@ -182,7 +207,7 @@ impl LshIndex {
 }
 
 /// Hash a band (slice of minhash values) into a single u64.
-fn hash_band(values: &[u64]) -> u64 {
+pub(crate) fn hash_band(values: &[u64]) -> u64 {
     let mut buf = Vec::with_capacity(values.len() * 8);
     for v in values {
         buf.extend_from_slice(&v.to_le_bytes());
@@ -211,7 +236,7 @@ pub(crate) fn jaccard_similarity(a: &FxHashSet<u64>, b: &FxHashSet<u64>) -> f64 
 ///
 /// We want: `(1/bands)^(1/rows) ≈ threshold`
 /// With 128 permutations, bands * rows <= 128.
-fn lsh_params_for_threshold(threshold: f64) -> (usize, usize) {
+pub(crate) fn lsh_params_for_threshold(threshold: f64) -> (usize, usize) {
     // For common thresholds, use known-good parameters
     if threshold >= 0.9 {
         (32, 4) // 32 bands × 4 rows = 128

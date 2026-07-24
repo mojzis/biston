@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, reason = "integration-test helpers treat setup failures as fatal")]
+
 use std::path::PathBuf;
 
 use biston::config::{Config, SuppressConfig};
@@ -19,6 +21,220 @@ fn config_for_file_with_suggest(filename: &str) -> Config {
     let mut config = config_for_file(filename);
     config.suggest.enabled = true;
     config
+}
+
+fn config_for_file_with_containment(filename: &str) -> Config {
+    let mut config = config_for_file(filename);
+    config.containment.enabled = true;
+    config
+}
+
+/// `(contained name, container name, role, 1-indexed container span)` for each finding.
+fn describe_containments(
+    report: &biston::report::CloneReport,
+) -> Vec<(String, String, &str, usize, usize)> {
+    report
+        .containments
+        .iter()
+        .map(|c| {
+            (
+                report.functions[c.contained].name.clone(),
+                report.functions[c.container].name.clone(),
+                c.role.as_str(),
+                c.start_line + 1,
+                c.end_line + 1,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn containment_is_off_by_default() {
+    let config = config_for_file("containment_append.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(
+        report.containments.is_empty(),
+        "containment must be opt-in, got {:?}",
+        describe_containments(&report)
+    );
+}
+
+#[test]
+fn containment_finds_an_appended_container() {
+    // B = A + C: A is the leading run of B's body.
+    let config = config_for_file_with_containment("containment_append.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    let found = describe_containments(&report);
+    assert_eq!(found.len(), 1, "expected exactly one finding, got {found:?}");
+
+    let (inner, outer, role, start, end) = &found[0];
+    assert_eq!(inner, "normalize_records");
+    assert_eq!(outer, "normalize_and_index_records");
+    assert_eq!(*role, "prefix");
+    // The run is the first three statements of the container's body.
+    assert_eq!((*start, *end), (25, 40), "container run span");
+    assert!(report.containments[0].score >= 0.85, "score {}", report.containments[0].score);
+    assert_eq!(report.containments[0].statement_count, 3);
+}
+
+#[test]
+fn containment_finds_a_prepended_container() {
+    // B = C + A: A is the *trailing* run of B's body. Every local in that run is
+    // registered after C's, so this only works with run-relative renumbering.
+    let config = config_for_file_with_containment("containment_prepend.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    let found = describe_containments(&report);
+    assert_eq!(found.len(), 1, "expected exactly one finding, got {found:?}");
+
+    let (inner, outer, role, start, end) = &found[0];
+    assert_eq!(inner, "normalize_records");
+    assert_eq!(outer, "load_then_normalize_records");
+    assert_eq!(*role, "suffix");
+    // `cleaned = []` through `return cleaned` — the same four statements that make
+    // up the contained function's body, including its return.
+    assert_eq!((*start, *end), (42, 58), "container run span");
+    assert_eq!(report.containments[0].statement_count, 4);
+    assert!(report.containments[0].score >= 0.85, "score {}", report.containments[0].score);
+}
+
+#[test]
+fn containment_ignores_a_function_in_the_middle() {
+    // Interior containment is out of scope for this phase. The run that contains the
+    // shared statements also carries a substantial trailing block, so it is far
+    // larger than the contained function and the size-balance guard rejects it.
+    let config = config_for_file_with_containment("containment_middle.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(
+        report.containments.is_empty(),
+        "interior containment must not be reported, got {:?}",
+        describe_containments(&report)
+    );
+}
+
+#[test]
+fn containment_ignores_a_lexically_nested_function() {
+    // A nested `def` is extracted in its own right and is also a statement of its
+    // parent, so it always matches a run of the parent. That is not duplication.
+    let config = config_for_file_with_containment("containment_nested.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert_eq!(report.functions.len(), 2, "fixture should yield the parent and the nested helper");
+    assert!(
+        report.containments.is_empty(),
+        "a nested function is not contained duplication, got {:?}",
+        describe_containments(&report)
+    );
+}
+
+#[test]
+fn containment_supersedes_the_symmetric_pair() {
+    // The append fixture is *also* found by symmetric detection (Jaccard 0.71).
+    // Reporting both says the same thing twice, and the directed form is the more
+    // actionable one, so the symmetric pair must be suppressed.
+    let plain = biston::scan(&fixtures_path(), &config_for_file("containment_append.py")).unwrap();
+    assert_eq!(plain.pairs.len(), 1, "symmetric detection should find this pair on its own");
+
+    let config = config_for_file_with_containment("containment_append.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert_eq!(report.containments.len(), 1);
+    assert!(report.pairs.is_empty(), "containment must supersede the symmetric pair");
+}
+
+#[test]
+fn suggest_emits_nothing_for_a_containment_relation() {
+    // An anti-unified template for a containment pair is an artefact of the lockstep
+    // walk diverging at the run boundary — a run of holes. Emitting nothing is better.
+    let mut config = config_for_file_with_containment("containment_append.py");
+    config.suggest.enabled = true;
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+
+    assert_eq!(report.containments.len(), 1, "fixture must produce a containment finding");
+    assert!(
+        report.suggestions.is_empty(),
+        "no template may be produced for a containment relation, got {} suggestion(s)",
+        report.suggestions.len()
+    );
+}
+
+#[test]
+fn suggest_still_works_for_ordinary_clones_with_containment_on() {
+    // Guard against "fixed" by disabling suggestions wholesale.
+    let mut config = config_for_file_with_containment("suggest_clones.py");
+    config.suggest.enabled = true;
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(!report.suggestions.is_empty(), "ordinary clone pairs must still get templates");
+}
+
+/// Split the prepend fixture so the two sides live in separate files.
+///
+/// Returns `(dir, contained_path, container_path)`.
+fn split_prepend_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let source = std::fs::read_to_string(fixtures_path().join("containment_prepend.py"))
+        .expect("read fixture");
+    let (inner, outer) =
+        source.split_once("\n\ndef load_then_normalize_records").expect("split fixture");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let contained_path = dir.path().join("contained.py");
+    let container_path = dir.path().join("container.py");
+    std::fs::write(&contained_path, inner).expect("write contained");
+    std::fs::write(&container_path, format!("def load_then_normalize_records{outer}"))
+        .expect("write container");
+    (dir, contained_path, container_path)
+}
+
+#[test]
+fn containment_is_found_across_files() {
+    let (dir, _, _) = split_prepend_fixture();
+    let mut config = Config::default();
+    config.scan.exclude = vec![];
+    config.containment.enabled = true;
+    let report = biston::scan(dir.path(), &config).unwrap();
+    assert_eq!(report.containments.len(), 1, "cross-file containment must be detected");
+}
+
+#[test]
+fn containment_is_in_scope_when_only_the_container_is_focused() {
+    let (dir, _, container_path) = split_prepend_fixture();
+    let mut config = Config::default();
+    config.scan.exclude = vec![];
+    config.containment.enabled = true;
+    let report = biston::scan_focused(dir.path(), &config, Some(&[container_path])).unwrap();
+    assert_eq!(report.containments.len(), 1, "focusing the container keeps the finding");
+}
+
+#[test]
+fn containment_is_in_scope_when_only_the_contained_is_focused() {
+    let (dir, contained_path, _) = split_prepend_fixture();
+    let mut config = Config::default();
+    config.scan.exclude = vec![];
+    config.containment.enabled = true;
+    let report = biston::scan_focused(dir.path(), &config, Some(&[contained_path])).unwrap();
+    assert_eq!(report.containments.len(), 1, "focusing the contained side keeps the finding");
+}
+
+#[test]
+fn containment_is_dropped_when_neither_side_is_focused() {
+    let (dir, _, _) = split_prepend_fixture();
+    let unrelated = dir.path().join("unrelated.py");
+    std::fs::write(&unrelated, "def unrelated():\n    return 1\n").unwrap();
+    let mut config = Config::default();
+    config.scan.exclude = vec![];
+    config.containment.enabled = true;
+    let report = biston::scan_focused(dir.path(), &config, Some(&[unrelated])).unwrap();
+    assert!(report.containments.is_empty(), "neither side in focus must drop the finding");
+}
+
+#[test]
+fn containment_ignores_a_trivial_shared_idiom() {
+    // open/read/guard/parse boilerplate really is a leading run of the larger
+    // function, but "extract this" is not useful advice about it. If this starts
+    // being reported, `min_fragment_lines` is too low.
+    let config = config_for_file_with_containment("containment_trivial.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert!(
+        report.containments.is_empty(),
+        "trivial idiom must be suppressed by the size floor, got {:?}",
+        describe_containments(&report)
+    );
 }
 
 #[test]

@@ -99,6 +99,13 @@ struct CommonOpts {
     #[arg(long)]
     tests_only: bool,
 
+    /// Also report functions that already implement the leading or trailing run
+    /// of another function's body ("you already wrote this, call it").
+    ///
+    /// Off by default. Tune with the `[containment]` config section.
+    #[arg(long)]
+    containment: bool,
+
     /// Only emit pairs involving this file (repeat the flag for multiple files).
     /// The rest of the tree is still scanned so cross-file clones between a
     /// focus file and the rest of the repo are still detected.
@@ -167,6 +174,10 @@ impl CommonOpts {
         }
         if self.tests_only {
             config.scan.scope_to_tests();
+        }
+        // The flag can only turn containment on; leaving it off defers to config.
+        if self.containment {
+            config.containment.enabled = true;
         }
 
         Ok((config, scan_path))

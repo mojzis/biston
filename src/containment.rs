@@ -1,0 +1,586 @@
+//! Detection of one function already implementing part of another.
+//!
+//! Scope for this phase is deliberately narrow: the contained function must match a
+//! **leading or trailing run of top-level statements** in the container's body.
+//! Interior and non-contiguous containment are out of scope.
+//!
+//! # Why fragments are probes, not index entries
+//!
+//! Only *whole-function ↔ fragment* comparisons are scored. Fragment ↔ fragment
+//! comparison is not filtered out after the fact — it is unrepresentable. The index
+//! is keyed by [`WholeFnId`], which is constructed only by [`BodyLshIndex::build`]
+//! while it walks whole functions; fragments reach the index solely through
+//! [`BodyLshIndex::probe`], which takes a signature and returns [`WholeFnId`]s. No
+//! fragment is ever stored, so no bucket can ever hold two of them.
+//!
+//! A useful consequence: the symmetric detector's index is untouched, so its bucket
+//! occupancy is unchanged by this feature.
+
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::config::ContainmentConfig;
+use crate::hash::{hash_statement_run, is_inert_statement};
+use crate::normalize::NormalizedNode;
+use crate::similarity::{hash_band, lsh_params_for_threshold, minhash_signature, MinHashSignature};
+
+/// Minimum subtree size for a hash to enter a fingerprint.
+///
+/// Matches the value the whole-function pipeline uses, so run fingerprints and
+/// function fingerprints are built to the same resolution.
+const MIN_SUBTREE_NODES: usize = 5;
+
+/// Upper bound on run lengths evaluated while refining one candidate's boundary.
+///
+/// Refinement is exact set arithmetic with no `MinHash`, so it is cheap, but it is
+/// still `O(statements × nodes)` per candidate. Truncation is logged rather than
+/// silent.
+const MAX_REFINE_STEPS: usize = 64;
+
+/// Which end of the container's body the run sits at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FragmentRole {
+    /// The leading run of the body.
+    Prefix,
+    /// The trailing run of the body.
+    Suffix,
+}
+
+impl FragmentRole {
+    /// Human-readable name, used in reports.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prefix => "prefix",
+            Self::Suffix => "suffix",
+        }
+    }
+}
+
+/// One function's body, prepared for containment analysis.
+///
+/// Built only when containment is enabled; see [`prepare_bodies`].
+pub struct FunctionBody<'a> {
+    /// Index into the report's function list.
+    pub fragment_index: usize,
+    /// Top-level statements of the body, in source order.
+    pub statements: &'a [NormalizedNode],
+    /// Line span (0-indexed, inclusive) of each statement, parallel to `statements`.
+    pub statement_spans: &'a [(usize, usize)],
+    /// Line count of the whole function.
+    pub function_lines: usize,
+    /// Fingerprint of the entire body, with run-relative placeholder numbering.
+    fingerprint: FxHashSet<u64>,
+}
+
+impl<'a> FunctionBody<'a> {
+    /// Prepare one function, returning `None` when it cannot take part.
+    fn new(
+        fragment_index: usize,
+        statements: &'a [NormalizedNode],
+        statement_spans: &'a [(usize, usize)],
+        function_lines: usize,
+        sort_commutative: bool,
+    ) -> Option<Self> {
+        if statements.len() != statement_spans.len() {
+            tracing::warn!(
+                "statement/span mismatch for fragment {fragment_index}: {} vs {}",
+                statements.len(),
+                statement_spans.len()
+            );
+            return None;
+        }
+        let fingerprint = hash_statement_run(statements, MIN_SUBTREE_NODES, sort_commutative);
+        if fingerprint.is_empty() {
+            return None;
+        }
+        Some(Self { fragment_index, statements, statement_spans, function_lines, fingerprint })
+    }
+
+    /// The statement range covered by a run of `length` statements in `role`.
+    fn range(&self, role: FragmentRole, length: usize) -> std::ops::Range<usize> {
+        match role {
+            FragmentRole::Prefix => 0..length,
+            FragmentRole::Suffix => self.statements.len() - length..self.statements.len(),
+        }
+    }
+
+    /// Line span (0-indexed, inclusive) of a run's *executable* statements.
+    ///
+    /// Docstrings and comments are excluded from both ends. They contribute nothing
+    /// to the fingerprint, and counting them towards the size floor lets a two-line
+    /// idiom under a sixteen-line docstring clear a fifteen-line floor — which is how
+    /// stock boilerplate slips past a guard meant to suppress exactly that.
+    ///
+    /// `None` when the run holds no executable statement at all.
+    fn span(&self, role: FragmentRole, length: usize) -> Option<(usize, usize)> {
+        let range = self.range(role, length);
+        let executable = range.filter(|&i| !is_inert_statement(&self.statements[i]));
+        let mut spans = executable.map(|i| self.statement_spans[i]);
+        let first = spans.next()?;
+        let last = spans.next_back().unwrap_or(first);
+        Some((first.0, last.1))
+    }
+
+    /// Line count of a run's executable statements, or 0 when it has none.
+    fn line_count(&self, role: FragmentRole, length: usize) -> usize {
+        self.span(role, length).map_or(0, |(start, end)| end.saturating_sub(start) + 1)
+    }
+
+    /// Number of executable statements in a run.
+    fn executable_count(&self, role: FragmentRole, length: usize) -> usize {
+        self.range(role, length).filter(|&i| !is_inert_statement(&self.statements[i])).count()
+    }
+
+    /// Fingerprint of a run, numbered relative to the run itself.
+    fn run_fingerprint(&self, role: FragmentRole, length: usize, sort: bool) -> FxHashSet<u64> {
+        hash_statement_run(&self.statements[self.range(role, length)], MIN_SUBTREE_NODES, sort)
+    }
+}
+
+/// Identifies a whole function inside the containment index.
+///
+/// There is deliberately no conversion from a fragment into this type, and
+/// [`BodyLshIndex`] exposes no `insert`. Together those make it impossible for a
+/// fragment to enter the index, so fragment-to-fragment comparison cannot happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct WholeFnId(usize);
+
+/// Banded LSH over *whole-function body* fingerprints.
+struct BodyLshIndex {
+    bands: usize,
+    rows: usize,
+    buckets: Vec<FxHashMap<u64, Vec<WholeFnId>>>,
+}
+
+impl BodyLshIndex {
+    /// Build the index. This is the only way to populate it, and it only ever walks
+    /// whole functions.
+    fn build(bodies: &[FunctionBody<'_>], threshold: f64) -> Self {
+        let (bands, rows) = lsh_params_for_threshold(threshold);
+        let mut index =
+            Self { bands, rows, buckets: (0..bands).map(|_| FxHashMap::default()).collect() };
+        for (position, body) in bodies.iter().enumerate() {
+            let signature = minhash_signature(&body.fingerprint);
+            for band in 0..index.bands {
+                let key = index.band_key(&signature, band);
+                index.buckets[band].entry(key).or_default().push(WholeFnId(position));
+            }
+        }
+        index
+    }
+
+    fn band_key(&self, signature: &MinHashSignature, band: usize) -> u64 {
+        let start = band * self.rows;
+        let end = (start + self.rows).min(signature.values.len());
+        hash_band(&signature.values[start..end])
+    }
+
+    /// Look up whole functions sharing a band with this fragment signature.
+    fn probe(&self, signature: &MinHashSignature) -> FxHashSet<WholeFnId> {
+        let mut hits = FxHashSet::default();
+        for band in 0..self.bands {
+            if let Some(bucket) = self.buckets[band].get(&self.band_key(signature, band)) {
+                hits.extend(bucket.iter().copied());
+            }
+        }
+        hits
+    }
+
+    /// Occupancy of every non-empty bucket, for reporting index pressure.
+    fn bucket_sizes(&self) -> Vec<usize> {
+        self.buckets.iter().flat_map(|band| band.values().map(Vec::len)).collect()
+    }
+}
+
+/// One function found to already implement a run of another's body.
+#[derive(Debug, Clone)]
+pub struct ContainmentFinding {
+    /// Fragment index of the function that is already implemented elsewhere.
+    pub contained: usize,
+    /// Fragment index of the function whose body contains it.
+    pub container: usize,
+    /// Which end of the container's body the run sits at.
+    pub role: FragmentRole,
+    /// First line of the run in the container (0-indexed).
+    pub start_line: usize,
+    /// Last line of the run in the container (0-indexed, inclusive).
+    pub end_line: usize,
+    /// Number of top-level statements the run spans.
+    pub statement_count: usize,
+    /// Containment coefficient, `|A ∩ F| / min(|A|, |F|)`.
+    pub score: f64,
+}
+
+/// Prepare per-function bodies for analysis.
+///
+/// `spans` supplies the line span of each top-level statement, parallel to the
+/// statements of the corresponding normalized function.
+#[must_use]
+pub fn prepare_bodies<'a>(
+    fragment_indices: &[usize],
+    statements: &[&'a [NormalizedNode]],
+    spans: &[&'a [(usize, usize)]],
+    function_lines: &[usize],
+    sort_commutative: bool,
+) -> Vec<FunctionBody<'a>> {
+    fragment_indices
+        .iter()
+        .zip(statements)
+        .zip(spans)
+        .zip(function_lines)
+        .filter_map(|(((&index, &stmts), &spans), &lines)| {
+            FunctionBody::new(index, stmts, spans, lines, sort_commutative)
+        })
+        .collect()
+}
+
+/// Find every function that already implements a leading or trailing run of another.
+///
+/// Results are sorted by score descending, then by container and contained index, so
+/// output is deterministic regardless of hash-map iteration order.
+#[must_use]
+pub fn find_containments(
+    bodies: &[FunctionBody<'_>],
+    config: &ContainmentConfig,
+    sort_commutative: bool,
+) -> Vec<ContainmentFinding> {
+    if bodies.len() < 2 {
+        return vec![];
+    }
+
+    let index = BodyLshIndex::build(bodies, config.threshold);
+    log_bucket_occupancy(&index);
+
+    // (contained position, container position, role) — sorted before scoring so the
+    // nondeterministic probe order cannot leak into the output.
+    let mut candidates: Vec<(WholeFnId, usize, FragmentRole)> = Vec::new();
+    for (container_pos, container) in bodies.iter().enumerate() {
+        for role in [FragmentRole::Prefix, FragmentRole::Suffix] {
+            for length in probe_ladder(container, role, config) {
+                let fingerprint = container.run_fingerprint(role, length, sort_commutative);
+                if fingerprint.is_empty() {
+                    continue;
+                }
+                for hit in index.probe(&minhash_signature(&fingerprint)) {
+                    if hit.0 != container_pos {
+                        candidates.push((hit, container_pos, role));
+                    }
+                }
+            }
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let mut findings: Vec<ContainmentFinding> = candidates
+        .into_iter()
+        .filter_map(|(contained, container_pos, role)| {
+            score_candidate(
+                &bodies[contained.0],
+                &bodies[container_pos],
+                role,
+                config,
+                sort_commutative,
+            )
+        })
+        .collect();
+
+    keep_best_per_pair(&mut findings);
+    findings.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.container.cmp(&b.container))
+            .then_with(|| a.contained.cmp(&b.contained))
+    });
+    findings
+}
+
+/// Run lengths worth probing for one function and role.
+///
+/// A geometric ladder at eighths of the statement count. Exactness is not required
+/// here — this stage only has to make the true run *collide*, and the boundary is
+/// then found exactly by [`score_candidate`]. A ladder step is within a factor of
+/// 1.14 of any true length, which puts the LSH collision probability near certainty.
+fn probe_ladder(
+    body: &FunctionBody<'_>,
+    role: FragmentRole,
+    config: &ContainmentConfig,
+) -> Vec<usize> {
+    let mut lengths: Vec<usize> = (1..=6)
+        .map(|numerator| (body.statements.len() * numerator).div_ceil(8).max(1))
+        .filter(|&length| is_eligible_run(body, role, length, config))
+        .collect();
+    lengths.sort_unstable();
+    lengths.dedup();
+    lengths.truncate((config.max_probes_per_function / 2).max(1));
+    lengths
+}
+
+/// Whether a run is long enough to be worth reporting and short enough to be a part.
+fn is_eligible_run(
+    body: &FunctionBody<'_>,
+    role: FragmentRole,
+    length: usize,
+    config: &ContainmentConfig,
+) -> bool {
+    let total = body.statements.len();
+    if length == 0 || length >= total {
+        // A run covering the whole body is the whole function again.
+        return false;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "statement counts are far below f64's exact-integer range"
+    )]
+    let fraction = length as f64 / total as f64;
+    if fraction > config.max_run_fraction {
+        return false;
+    }
+    body.line_count(role, length) >= config.min_fragment_lines
+}
+
+/// Find the exact run boundary for one candidate and apply the reporting guards.
+///
+/// Returns `None` unless every guard passes.
+fn score_candidate(
+    contained: &FunctionBody<'_>,
+    host: &FunctionBody<'_>,
+    role: FragmentRole,
+    config: &ContainmentConfig,
+    sort_commutative: bool,
+) -> Option<ContainmentFinding> {
+    // Ratio guard: below this the contained function is a detail of a much larger
+    // one rather than an abstraction worth naming.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "line counts are far below f64's exact-integer range"
+    )]
+    let ratio = contained.function_lines as f64 / host.function_lines as f64;
+    if ratio < config.min_ratio {
+        return None;
+    }
+
+    let eligible: Vec<usize> = (1..host.statements.len())
+        .filter(|&length| is_eligible_run(host, role, length, config))
+        .collect();
+    if eligible.len() > MAX_REFINE_STEPS {
+        tracing::debug!(
+            "containment: refining only {MAX_REFINE_STEPS} of {} run lengths for fragment {}",
+            eligible.len(),
+            host.fragment_index
+        );
+    }
+
+    let balance_floor = config.size_balance_floor();
+    let mut best: Option<(f64, f64, usize)> = None;
+    for length in eligible.into_iter().take(MAX_REFINE_STEPS) {
+        let fragment = host.run_fingerprint(role, length, sort_commutative);
+        let Some((score, balance)) = compare(&contained.fingerprint, &fragment) else {
+            continue;
+        };
+        if score < config.threshold || balance < balance_floor {
+            continue;
+        }
+        // Prefer the highest containment, then the most balanced, then the shortest
+        // run — the shortest is the tightest description of what was duplicated.
+        let better = best.is_none_or(|(best_score, best_balance, _)| {
+            (score, balance) > (best_score, best_balance)
+        });
+        if better {
+            best = Some((score, balance, length));
+        }
+    }
+
+    let (score, _, length) = best?;
+    // `is_eligible_run` already rejected runs with no executable statement.
+    let (start_line, end_line) = host.span(role, length)?;
+    Some(ContainmentFinding {
+        contained: contained.fragment_index,
+        container: host.fragment_index,
+        role,
+        start_line,
+        end_line,
+        statement_count: host.executable_count(role, length),
+        score,
+    })
+}
+
+/// Containment coefficient and size balance between a function body and a run.
+///
+/// `None` when either side is empty, which carries no evidence either way.
+fn compare(function: &FxHashSet<u64>, fragment: &FxHashSet<u64>) -> Option<(f64, f64)> {
+    if function.is_empty() || fragment.is_empty() {
+        return None;
+    }
+    let shared = function.intersection(fragment).count();
+    let smaller = function.len().min(fragment.len());
+    let larger = function.len().max(fragment.len());
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "fingerprint sizes are far below f64's exact-integer range"
+    )]
+    let result = (shared as f64 / smaller as f64, smaller as f64 / larger as f64);
+    Some(result)
+}
+
+/// Keep only the strongest finding for each (contained, container) pair.
+///
+/// The same pair can surface under both roles when a body is short enough that its
+/// leading and trailing runs overlap.
+fn keep_best_per_pair(findings: &mut Vec<ContainmentFinding>) {
+    let mut best: FxHashMap<(usize, usize), usize> = FxHashMap::default();
+    for (position, finding) in findings.iter().enumerate() {
+        let key = (finding.contained, finding.container);
+        match best.get(&key) {
+            Some(&existing) if findings[existing].score >= finding.score => {}
+            _ => {
+                best.insert(key, position);
+            }
+        }
+    }
+    let mut keep: Vec<usize> = best.into_values().collect();
+    keep.sort_unstable();
+    let mut kept = Vec::with_capacity(keep.len());
+    for (position, finding) in findings.drain(..).enumerate() {
+        if keep.binary_search(&position).is_ok() {
+            kept.push(finding);
+        }
+    }
+    *findings = kept;
+}
+
+/// Report index pressure at debug level: more entries means quadratically more
+/// candidate pairs in the fattest buckets.
+fn log_bucket_occupancy(index: &BodyLshIndex) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let mut sizes = index.bucket_sizes();
+    if sizes.is_empty() {
+        return;
+    }
+    sizes.sort_unstable();
+    let p99 = sizes[sizes.len() * 99 / 100];
+    tracing::debug!(
+        "containment index: {} entries in {} buckets, p99 occupancy {p99}, max {}",
+        sizes.iter().sum::<usize>(),
+        sizes.len(),
+        sizes.last().copied().unwrap_or(0),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compare_rejects_empty_sides() {
+        let empty = FxHashSet::default();
+        let full: FxHashSet<u64> = (0..10).collect();
+        assert!(compare(&empty, &full).is_none());
+        assert!(compare(&full, &empty).is_none());
+        assert!(compare(&empty, &empty).is_none());
+    }
+
+    #[test]
+    fn compare_scores_a_strict_subset_as_full_containment_but_unbalanced() {
+        let function: FxHashSet<u64> = (0..10).collect();
+        let fragment: FxHashSet<u64> = (0..40).collect();
+        let (score, balance) = compare(&function, &fragment).unwrap();
+        assert!((score - 1.0).abs() < f64::EPSILON, "subset should score 1.0, got {score}");
+        assert!((balance - 0.25).abs() < f64::EPSILON, "balance should be 10/40, got {balance}");
+    }
+
+    #[test]
+    fn compare_scores_identical_sets_perfectly() {
+        let set: FxHashSet<u64> = (0..25).collect();
+        let (score, balance) = compare(&set, &set).unwrap();
+        assert!((score - 1.0).abs() < f64::EPSILON);
+        assert!((balance - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn size_balance_floor_is_the_reciprocal() {
+        let config = ContainmentConfig { size_balance: 1.25, ..ContainmentConfig::default() };
+        assert!((config.size_balance_floor() - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn size_balance_floor_of_zero_disables_the_guard() {
+        let config = ContainmentConfig { size_balance: 0.0, ..ContainmentConfig::default() };
+        assert!(config.size_balance_floor().abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn ladder_covers_eighths_and_respects_the_probe_cap() {
+        // 16 executable statements, no line-length floor in the way.
+        let statements: Vec<NormalizedNode> = (0..16)
+            .map(|_| NormalizedNode {
+                kind: "return_statement",
+                text: None,
+                children: vec![],
+                byte_range: None,
+            })
+            .collect();
+        let spans: Vec<(usize, usize)> = (0..16).map(|i| (i * 40, i * 40 + 39)).collect();
+        let body = FunctionBody {
+            fragment_index: 0,
+            statements: &statements,
+            statement_spans: &spans,
+            function_lines: 640,
+            fingerprint: (0..5).collect(),
+        };
+        let config = ContainmentConfig { min_fragment_lines: 1, ..ContainmentConfig::default() };
+        let ladder = probe_ladder(&body, FragmentRole::Prefix, &config);
+        assert_eq!(ladder, vec![2, 4, 6, 8, 10, 12], "eighths of 16");
+        assert!(ladder.len() <= config.max_probes_per_function / 2);
+    }
+
+    #[test]
+    fn ladder_excludes_runs_covering_the_whole_body() {
+        let statements: Vec<NormalizedNode> = (0..4)
+            .map(|_| NormalizedNode {
+                kind: "return_statement",
+                text: None,
+                children: vec![],
+                byte_range: None,
+            })
+            .collect();
+        let spans: Vec<(usize, usize)> = (0..4).map(|i| (i * 40, i * 40 + 39)).collect();
+        let body = FunctionBody {
+            fragment_index: 0,
+            statements: &statements,
+            statement_spans: &spans,
+            function_lines: 160,
+            fingerprint: (0..5).collect(),
+        };
+        let config = ContainmentConfig { min_fragment_lines: 1, ..ContainmentConfig::default() };
+        let ladder = probe_ladder(&body, FragmentRole::Prefix, &config);
+        assert!(!ladder.contains(&4), "a 4-of-4 run is the whole body: {ladder:?}");
+        assert!(ladder.iter().all(|&k| k < 4));
+    }
+
+    #[test]
+    fn keep_best_per_pair_retains_only_the_strongest() {
+        let make = |contained, container, score, role| ContainmentFinding {
+            contained,
+            container,
+            role,
+            start_line: 0,
+            end_line: 10,
+            statement_count: 3,
+            score,
+        };
+        let mut findings = vec![
+            make(0, 1, 0.9, FragmentRole::Prefix),
+            make(0, 1, 0.95, FragmentRole::Suffix),
+            make(2, 3, 0.88, FragmentRole::Prefix),
+        ];
+        keep_best_per_pair(&mut findings);
+        assert_eq!(findings.len(), 2);
+        let pair = findings.iter().find(|f| (f.contained, f.container) == (0, 1)).unwrap();
+        assert!((pair.score - 0.95).abs() < f64::EPSILON);
+        assert_eq!(pair.role, FragmentRole::Suffix);
+    }
+}

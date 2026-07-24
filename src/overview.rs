@@ -293,6 +293,7 @@ mod tests {
             functions,
             normalized: vec![],
             pairs,
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         }

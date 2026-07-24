@@ -1,5 +1,6 @@
 pub mod antiunify;
 pub mod config;
+pub mod containment;
 pub mod discovery;
 pub mod extract;
 pub mod hash;
@@ -19,6 +20,7 @@ use rustc_hash::FxHashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::Config;
+use crate::containment::ContainmentFinding;
 use crate::extract::FunctionFragment;
 use crate::hash::HashedFunction;
 use crate::normalize::NormalizedNode;
@@ -55,6 +57,11 @@ struct ProcessedFunction {
     fragment: FunctionFragment,
     normalized: NormalizedNode,
     hashed: HashedFunction,
+    /// Line span of each top-level body statement, for containment analysis.
+    ///
+    /// `None` unless containment is enabled: the fragment work must be skippable
+    /// entirely, not computed and discarded.
+    statement_spans: Option<Vec<(usize, usize)>>,
 }
 
 /// Run the full clone detection pipeline on a directory.
@@ -91,6 +98,7 @@ pub fn scan_focused(
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         });
@@ -129,6 +137,7 @@ pub fn scan_focused(
             functions,
             normalized,
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats,
         });
@@ -138,20 +147,36 @@ pub fn scan_focused(
     let mut functions = Vec::with_capacity(processed.len());
     let mut normalized = Vec::with_capacity(processed.len());
     let mut hashed = Vec::with_capacity(processed.len());
+    let mut statement_spans = Vec::with_capacity(processed.len());
     for p in processed {
         functions.push(p.fragment);
         normalized.push(p.normalized);
         hashed.push(p.hashed);
+        statement_spans.push(p.statement_spans);
     }
     let mut pairs = similarity::find_similar_functions(&hashed, config.scan.threshold);
 
-    // 5. If the caller supplied a focus set, drop pairs that don't involve
-    // any of the focus files. Full-repo processing above means cross-file
-    // clones between focus and non-focus files are still detected.
+    // 5. Containment: which functions already implement a leading or trailing run of
+    // another's body. Skipped wholesale when disabled.
+    let mut containments = find_containments(config, &normalized, &functions, &statement_spans);
+
+    // 6. If the caller supplied a focus set, drop findings that don't involve any of
+    // the focus files. Full-repo processing above means cross-file clones between
+    // focus and non-focus files are still detected.
     if let Some(focus) = focus_set.as_ref() {
         let focus_indices = focus_fragment_indices(&functions, focus);
         pairs = filter_pairs_by_focus(pairs, &focus_indices);
+        containments = filter_containments_by_focus(containments, &focus_indices);
     }
+
+    // 7. Containment wins over similarity for the same pair. "A already implements
+    // this run of B, call it instead" is strictly more actionable than "A and B look
+    // alike", and reporting both says the same thing twice.
+    //
+    // This runs before suggestions deliberately: an anti-unified template for a
+    // containment pair is a hole-riddled artefact of the lockstep walk diverging at
+    // the run boundary, and emitting nothing is better than emitting that.
+    suppress_pairs_superseded_by_containment(&mut pairs, &containments);
 
     let suggestions = build_suggestions(config, &pairs, &normalized, &functions);
 
@@ -160,7 +185,119 @@ pub fn scan_focused(
         normalized.len(),
         "each function must have a corresponding normalized node"
     );
-    Ok(CloneReport { files_scanned, functions, normalized, pairs, suggestions, suppression_stats })
+    Ok(CloneReport {
+        files_scanned,
+        functions,
+        normalized,
+        pairs,
+        containments,
+        suggestions,
+        suppression_stats,
+    })
+}
+
+/// Run containment detection, or return nothing at all when it is disabled.
+fn find_containments(
+    config: &Config,
+    normalized: &[NormalizedNode],
+    functions: &[FunctionFragment],
+    statement_spans: &[Option<Vec<(usize, usize)>>],
+) -> Vec<ContainmentFinding> {
+    if !config.containment.enabled {
+        return vec![];
+    }
+
+    let mut indices = Vec::new();
+    let mut statements = Vec::new();
+    let mut spans = Vec::new();
+    let mut lines = Vec::new();
+    for (index, function) in functions.iter().enumerate() {
+        let Some(function_spans) = statement_spans[index].as_deref() else {
+            continue;
+        };
+        indices.push(index);
+        statements.push(hash::body_statements(&normalized[index]));
+        spans.push(function_spans);
+        lines.push(function.end_line.saturating_sub(function.start_line) + 1);
+    }
+
+    let bodies = containment::prepare_bodies(
+        &indices,
+        &statements,
+        &spans,
+        &lines,
+        config.normalization.sort_commutative,
+    );
+    let findings = containment::find_containments(
+        &bodies,
+        &config.containment,
+        config.normalization.sort_commutative,
+    );
+    drop_lexically_nested(findings, functions)
+}
+
+/// Drop findings where one function is lexically inside the other.
+///
+/// A nested `def` is extracted as a function in its own right *and* appears as a
+/// statement of its parent, so it always "matches" a run of the parent. Telling a
+/// reader that `outer:10-30 is already implemented by inner — call it instead` is
+/// nonsense: that code *is* `inner`, in the only place it exists.
+fn drop_lexically_nested(
+    findings: Vec<ContainmentFinding>,
+    functions: &[FunctionFragment],
+) -> Vec<ContainmentFinding> {
+    findings
+        .into_iter()
+        .filter(|f| {
+            let inner = &functions[f.contained];
+            let outer = &functions[f.container];
+            if inner.file_path != outer.file_path {
+                return true;
+            }
+            let encloses = |a: &FunctionFragment, b: &FunctionFragment| {
+                a.byte_range.start >= b.byte_range.start && a.byte_range.end <= b.byte_range.end
+            };
+            !encloses(inner, outer) && !encloses(outer, inner)
+        })
+        .collect()
+}
+
+/// Drop symmetric pairs that a containment finding already describes.
+///
+/// The relation is unordered on the `pairs` side and directed on the containment
+/// side, so both orientations of the pair are matched.
+fn suppress_pairs_superseded_by_containment(
+    pairs: &mut Vec<crate::similarity::SimilarPair>,
+    containments: &[ContainmentFinding],
+) {
+    if containments.is_empty() {
+        return;
+    }
+    let superseded: FxHashSet<(usize, usize)> = containments
+        .iter()
+        .map(|c| {
+            if c.contained < c.container {
+                (c.contained, c.container)
+            } else {
+                (c.container, c.contained)
+            }
+        })
+        .collect();
+    pairs.retain(|p| {
+        let key = if p.left < p.right { (p.left, p.right) } else { (p.right, p.left) };
+        !superseded.contains(&key)
+    });
+}
+
+/// Keep containment findings where *either* side is in the focus set.
+fn filter_containments_by_focus(
+    findings: Vec<ContainmentFinding>,
+    focus_indices: &FxHashSet<usize>,
+) -> Vec<ContainmentFinding> {
+    findings
+        .into_iter()
+        .filter(|f| focus_indices.contains(&f.contained) || focus_indices.contains(&f.container))
+        .collect()
 }
 
 /// Canonicalise the caller-supplied focus paths into a set for O(1) lookup.
@@ -284,8 +421,25 @@ fn process_file(
                 normalize::normalize_function(func_node, &parsed.source, &config.normalization);
             let hashed =
                 hash::hash_function(&normalized, 0, 5, config.normalization.sort_commutative);
-            ProcessedFunction { fragment, normalized, hashed }
+            let statement_spans =
+                config.containment.enabled.then(|| body_statement_spans(func_node));
+            ProcessedFunction { fragment, normalized, hashed, statement_spans }
         })
+        .collect()
+}
+
+/// Line span (0-indexed, inclusive) of each top-level statement in a function body.
+///
+/// Parallel to [`hash::body_statements`] of the same function: normalization keeps one
+/// node per named child of the `block`, including comments and docstrings.
+fn body_statement_spans(func_node: tree_sitter::Node<'_>) -> Vec<(usize, usize)> {
+    let Some(block) = func_node.child_by_field_name("body") else {
+        return vec![];
+    };
+    let mut cursor = block.walk();
+    block
+        .named_children(&mut cursor)
+        .map(|statement| (statement.start_position().row, statement.end_position().row))
         .collect()
 }
 

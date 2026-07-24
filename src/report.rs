@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::antiunify::TemplateQuality;
 use crate::config::OutputConfig;
+use crate::containment::ContainmentFinding;
 use crate::extract::FunctionFragment;
 use crate::normalize::NormalizedNode;
 use crate::similarity::SimilarPair;
@@ -29,6 +30,10 @@ pub struct CloneReport {
     /// Normalized AST for each function (parallel to `functions`).
     pub normalized: Vec<NormalizedNode>,
     pub pairs: Vec<SimilarPair>,
+    /// Functions that already implement a leading or trailing run of another's body.
+    ///
+    /// Directed, unlike `pairs`: the relation has a container and a contained side.
+    pub containments: Vec<ContainmentFinding>,
     /// Suggested abstractions for clone pairs.
     pub suggestions: Vec<Suggestion>,
     /// How many functions/files were suppressed.
@@ -173,8 +178,16 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
     let (bold, cyan, yellow, reset) =
         if config.color { (BOLD, CYAN, YELLOW, RESET) } else { ("", "", "", "") };
 
-    if clusters.is_empty() {
+    if clusters.is_empty() && report.containments.is_empty() {
         output.push_str("No clones detected.\n");
+        append_suppression_line(&report.suppression_stats, &mut output);
+        return output;
+    }
+
+    append_containments(report, config, &mut output);
+
+    if clusters.is_empty() {
+        append_suppression_hint(&mut output);
         append_suppression_line(&report.suppression_stats, &mut output);
         return output;
     }
@@ -250,6 +263,44 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
     output
 }
 
+/// Append the directed containment findings.
+///
+/// Phrased as an instruction rather than an observation: the finding is not "these
+/// two look alike" but "this code already exists, call it".
+fn append_containments(report: &CloneReport, config: &OutputConfig, output: &mut String) {
+    if report.containments.is_empty() {
+        return;
+    }
+    let (bold, cyan, reset) = if config.color { (BOLD, CYAN, RESET) } else { ("", "", "") };
+
+    let count = report.containments.len().min(config.max_results);
+    let _ = writeln!(output, "{bold}Found {count} already-implemented run(s):{reset}\n");
+
+    for c in report.containments.iter().take(config.max_results) {
+        let outer = &report.functions[c.container];
+        let inner = &report.functions[c.contained];
+        let _ = writeln!(
+            output,
+            "  {}:{}-{} is already implemented by {cyan}{}{reset} at {}:{} — call it instead.",
+            outer.file_path.display(),
+            c.start_line + 1,
+            c.end_line + 1,
+            inner.name,
+            inner.file_path.display(),
+            inner.start_line + 1,
+        );
+        let _ = writeln!(
+            output,
+            "    ({} run of {}, {} statements, containment {:.2})",
+            c.role.as_str(),
+            outer.name,
+            c.statement_count,
+            c.score,
+        );
+    }
+    let _ = writeln!(output);
+}
+
 /// Teach the reader how to silence a false positive.
 ///
 /// Precondition: only call this when at least one clone was found — there's
@@ -275,14 +326,46 @@ fn append_suppression_line(stats: &SuppressionStats, output: &mut String) {
     }
 }
 
+/// Version of the JSON report schema.
+///
+/// Version 1 had no version field at all, so an absent `schema_version` means
+/// "pre-containment": `clusters` / `suggestions` / `suppressed` only. Version 2 adds
+/// `containments`, a directed relation with a container, a contained function and the
+/// container's run span.
+pub const JSON_SCHEMA_VERSION: u32 = 2;
+
 /// JSON output structures.
 #[derive(Serialize)]
 struct JsonReport {
+    schema_version: u32,
     clusters: Vec<JsonCluster>,
+    /// Directed findings. Omitted entirely when containment is disabled or finds
+    /// nothing, so enabling the feature is what changes the shape.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    containments: Vec<JsonContainment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     suggestions: Vec<JsonSuggestion>,
     #[serde(skip_serializing_if = "JsonSuppressed::is_zero")]
     suppressed: JsonSuppressed,
+}
+
+/// One function already implemented by a run of another's body.
+#[derive(Serialize)]
+struct JsonContainment {
+    /// The function that is already implemented elsewhere.
+    contained: JsonFunction,
+    /// The function whose body contains it.
+    container: JsonFunction,
+    /// `prefix` when the run leads the container's body, `suffix` when it trails.
+    role: &'static str,
+    /// First line of the run within the container (1-indexed).
+    start_line: usize,
+    /// Last line of the run within the container (1-indexed, inclusive).
+    end_line: usize,
+    /// Top-level statements the run spans.
+    statement_count: usize,
+    /// Containment coefficient, `|A ∩ F| / min(|A|, |F|)`.
+    score: f64,
 }
 
 #[derive(Serialize, Default)]
@@ -366,7 +449,9 @@ pub fn format_json(report: &CloneReport, config: &OutputConfig) -> anyhow::Resul
         .collect();
 
     let json_report = JsonReport {
+        schema_version: JSON_SCHEMA_VERSION,
         clusters: json_clusters,
+        containments: json_containments(report, config),
         suggestions: json_suggestions,
         suppressed: JsonSuppressed {
             config_files: report.suppression_stats.config_files,
@@ -377,69 +462,154 @@ pub fn format_json(report: &CloneReport, config: &OutputConfig) -> anyhow::Resul
     serde_json::to_string_pretty(&json_report).context("failed to serialize JSON report")
 }
 
+/// Render a function reference for JSON output.
+fn json_function(func: &crate::extract::FunctionFragment, show_source: bool) -> JsonFunction {
+    JsonFunction {
+        name: func.name.clone(),
+        file: func.file_path.display().to_string(),
+        start_line: func.start_line + 1,
+        end_line: func.end_line + 1,
+        source: show_source.then(|| func.source_text.clone()),
+    }
+}
+
+/// Render every containment finding for JSON output.
+fn json_containments(report: &CloneReport, config: &OutputConfig) -> Vec<JsonContainment> {
+    report
+        .containments
+        .iter()
+        .take(config.max_results)
+        .map(|c| JsonContainment {
+            contained: json_function(&report.functions[c.contained], config.show_source),
+            container: json_function(&report.functions[c.container], config.show_source),
+            role: c.role.as_str(),
+            start_line: c.start_line + 1,
+            end_line: c.end_line + 1,
+            statement_count: c.statement_count,
+            score: c.score,
+        })
+        .collect()
+}
+
+/// SARIF results for containment findings.
+///
+/// The primary location is the **container's run span** — the code a reader would
+/// delete — with the contained function as a related location. The message names both
+/// sides in order so the direction cannot be misread.
+fn sarif_containment_results(report: &CloneReport) -> Vec<serde_json::Value> {
+    report
+        .containments
+        .iter()
+        .map(|c| {
+            let outer = &report.functions[c.container];
+            let inner = &report.functions[c.contained];
+            serde_json::json!({
+                "ruleId": "biston/containment-detected",
+                "level": "warning",
+                "message": {
+                    "text": format!(
+                        "{}:{}-{} (the {} run of `{}`) is already implemented by `{}` at {}:{} \
+                         (containment: {:.2}, {} statements) — call `{}` instead of repeating it.",
+                        outer.file_path.display(),
+                        c.start_line + 1,
+                        c.end_line + 1,
+                        c.role.as_str(),
+                        outer.name,
+                        inner.name,
+                        inner.file_path.display(),
+                        inner.start_line + 1,
+                        c.score,
+                        c.statement_count,
+                        inner.name,
+                    )
+                },
+                "locations": [sarif_location(
+                    &outer.file_path.display().to_string(),
+                    c.start_line + 1,
+                    c.end_line + 1,
+                )],
+                "relatedLocations": [sarif_location(
+                    &inner.file_path.display().to_string(),
+                    inner.start_line + 1,
+                    inner.end_line + 1,
+                )]
+            })
+        })
+        .collect()
+}
+
+/// A SARIF physical location for a 1-indexed line range.
+fn sarif_location(uri: &str, start_line: usize, end_line: usize) -> serde_json::Value {
+    serde_json::json!({
+        "physicalLocation": {
+            "artifactLocation": { "uri": uri },
+            "region": { "startLine": start_line, "endLine": end_line }
+        }
+    })
+}
+
 /// Format the report as SARIF (Static Analysis Results Interchange Format).
 pub fn format_sarif(report: &CloneReport, _config: &OutputConfig) -> anyhow::Result<String> {
     let clusters = cluster_pairs(&report.pairs, report.functions.len());
     let sug_map = suggestion_map(&report.suggestions);
 
-    let results: Vec<serde_json::Value> = clusters
-        .iter()
-        .enumerate()
-        .map(|(i, cluster)| {
-            let locations: Vec<serde_json::Value> = cluster
-                .members
-                .iter()
-                .map(|&idx| {
-                    let func = &report.functions[idx];
-                    serde_json::json!({
-                        "physicalLocation": {
-                            "artifactLocation": {
-                                "uri": func.file_path.display().to_string()
-                            },
-                            "region": {
-                                "startLine": func.start_line + 1,
-                                "endLine": func.end_line + 1
-                            }
+    let cluster_results = clusters.iter().enumerate().map(|(i, cluster)| {
+        let locations: Vec<serde_json::Value> = cluster
+            .members
+            .iter()
+            .map(|&idx| {
+                let func = &report.functions[idx];
+                serde_json::json!({
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": func.file_path.display().to_string()
+                        },
+                        "region": {
+                            "startLine": func.start_line + 1,
+                            "endLine": func.end_line + 1
                         }
-                    })
+                    }
                 })
-                .collect();
-
-            let member_names: Vec<String> =
-                cluster.members.iter().map(|&idx| report.functions[idx].name.clone()).collect();
-
-            let mut message = format!(
-                "Clone cluster #{} (similarity: {:.2}): {}",
-                i + 1,
-                cluster.min_similarity,
-                member_names.join(", ")
-            );
-
-            // Append suggestion info if available
-            let suggestions = cluster_suggestions(cluster, &report.pairs, &sug_map);
-            for sug in suggestions {
-                use std::fmt::Write;
-                let _ = write!(
-                    message,
-                    "\nSuggested abstraction (quality: {:.2}, holes: {})",
-                    sug.quality.score, sug.quality.hole_count
-                );
-                if let Some(ref rendered) = sug.rendered {
-                    let _ = write!(message, "\n{rendered}");
-                }
-            }
-
-            serde_json::json!({
-                "ruleId": "biston/clone-detected",
-                "level": "warning",
-                "message": {
-                    "text": message
-                },
-                "locations": [locations.first()],
-                "relatedLocations": locations.iter().skip(1).collect::<Vec<_>>()
             })
+            .collect();
+
+        let member_names: Vec<String> =
+            cluster.members.iter().map(|&idx| report.functions[idx].name.clone()).collect();
+
+        let mut message = format!(
+            "Clone cluster #{} (similarity: {:.2}): {}",
+            i + 1,
+            cluster.min_similarity,
+            member_names.join(", ")
+        );
+
+        // Append suggestion info if available
+        let suggestions = cluster_suggestions(cluster, &report.pairs, &sug_map);
+        for sug in suggestions {
+            use std::fmt::Write;
+            let _ = write!(
+                message,
+                "\nSuggested abstraction (quality: {:.2}, holes: {})",
+                sug.quality.score, sug.quality.hole_count
+            );
+            if let Some(ref rendered) = sug.rendered {
+                let _ = write!(message, "\n{rendered}");
+            }
+        }
+
+        serde_json::json!({
+            "ruleId": "biston/clone-detected",
+            "level": "warning",
+            "message": {
+                "text": message
+            },
+            "locations": [locations.first()],
+            "relatedLocations": locations.iter().skip(1).collect::<Vec<_>>()
         })
-        .collect();
+    });
+
+    let results: Vec<serde_json::Value> =
+        cluster_results.chain(sarif_containment_results(report)).collect();
 
     let stats = &report.suppression_stats;
     let total_suppressed = stats.config_files + stats.file_comments + stats.inline_functions;
@@ -495,6 +665,108 @@ mod tests {
         SimilarPair { left, right, similarity }
     }
 
+    /// A report with one containment finding and no symmetric pairs.
+    fn containment_report() -> CloneReport {
+        CloneReport {
+            files_scanned: 2,
+            functions: vec![
+                make_func("normalize_records", "a.py", 11, 26),
+                make_func("load_then_normalize", "b.py", 39, 57),
+            ],
+            normalized: vec![],
+            pairs: vec![],
+            containments: vec![ContainmentFinding {
+                contained: 0,
+                container: 1,
+                role: crate::containment::FragmentRole::Suffix,
+                start_line: 41,
+                end_line: 57,
+                statement_count: 4,
+                score: 0.94,
+            }],
+            suggestions: vec![],
+            suppression_stats: SuppressionStats::default(),
+        }
+    }
+
+    // --- Containment reporting tests ---
+
+    #[test]
+    fn text_states_the_direction_as_an_instruction() {
+        let output = format_text(&containment_report(), &OutputConfig::default());
+        // 1-indexed span of the run inside the container, then the callee.
+        assert!(
+            output.contains("b.py:42-58 is already implemented by normalize_records at a.py:12"),
+            "directed phrasing missing from:\n{output}"
+        );
+        assert!(output.contains("call it instead"), "missing the instruction:\n{output}");
+        assert!(
+            !output.contains("Clone cluster"),
+            "there are no symmetric pairs to report:\n{output}"
+        );
+    }
+
+    #[test]
+    fn text_reports_the_role_and_statement_count() {
+        let output = format_text(&containment_report(), &OutputConfig::default());
+        assert!(output.contains("suffix run of load_then_normalize"), "got:\n{output}");
+        assert!(output.contains("4 statements"), "got:\n{output}");
+        assert!(output.contains("containment 0.94"), "got:\n{output}");
+    }
+
+    #[test]
+    fn json_carries_the_schema_version() {
+        let json = format_json(&containment_report(), &OutputConfig::default()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["schema_version"], 2);
+    }
+
+    #[test]
+    fn json_containment_is_directed_and_spans_the_container() {
+        let json = format_json(&containment_report(), &OutputConfig::default()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let finding = &parsed["containments"][0];
+        assert_eq!(finding["contained"]["name"], "normalize_records");
+        assert_eq!(finding["container"]["name"], "load_then_normalize");
+        assert_eq!(finding["role"], "suffix");
+        assert_eq!(finding["start_line"], 42);
+        assert_eq!(finding["end_line"], 58);
+        assert_eq!(finding["statement_count"], 4);
+    }
+
+    #[test]
+    fn json_omits_containments_when_there_are_none() {
+        let report = CloneReport {
+            containments: vec![],
+            pairs: vec![make_pair(0, 1, 0.9)],
+            ..containment_report()
+        };
+        let json = format_json(&report, &OutputConfig::default()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("containments").is_none(), "got: {json}");
+        assert_eq!(parsed["schema_version"], 2, "version is emitted regardless");
+    }
+
+    #[test]
+    fn sarif_anchors_the_result_to_the_container_run() {
+        let sarif = format_sarif(&containment_report(), &OutputConfig::default()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let result = &parsed["runs"][0]["results"][0];
+        assert_eq!(result["ruleId"], "biston/containment-detected");
+
+        let primary = &result["locations"][0]["physicalLocation"];
+        assert_eq!(primary["artifactLocation"]["uri"], "b.py", "primary must be the container");
+        assert_eq!(primary["region"]["startLine"], 42);
+        assert_eq!(primary["region"]["endLine"], 58);
+
+        let related = &result["relatedLocations"][0]["physicalLocation"];
+        assert_eq!(related["artifactLocation"]["uri"], "a.py", "related must be the contained fn");
+
+        let text = result["message"]["text"].as_str().unwrap();
+        assert!(text.contains("is already implemented by `normalize_records`"), "got: {text}");
+        assert!(text.contains("call `normalize_records` instead"), "got: {text}");
+    }
+
     // --- Clustering tests ---
 
     #[test]
@@ -539,6 +811,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -560,6 +833,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -579,6 +853,7 @@ mod tests {
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -595,6 +870,7 @@ mod tests {
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -615,6 +891,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9), make_pair(2, 3, 0.8)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -636,6 +913,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -656,6 +934,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -677,6 +956,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -697,6 +977,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -716,6 +997,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -742,6 +1024,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -760,6 +1043,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -786,6 +1070,7 @@ mod tests {
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: nonzero_suppression_stats(),
         };
@@ -803,6 +1088,7 @@ mod tests {
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: nonzero_suppression_stats(),
         };
@@ -821,6 +1107,7 @@ mod tests {
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: nonzero_suppression_stats(),
         };

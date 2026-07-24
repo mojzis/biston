@@ -1,4 +1,4 @@
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::normalize::NormalizedNode;
 
@@ -58,7 +58,7 @@ pub fn hash_function(
 ) -> HashedFunction {
     let mut subtree_hashes = FxHashSet::default();
     let (root_hash, _depth_hashes, _count) =
-        hash_node(normalized, min_subtree_nodes, sort_commutative, &mut subtree_hashes);
+        hash_node(normalized, min_subtree_nodes, sort_commutative, &mut subtree_hashes, &mut None);
     HashedFunction {
         fragment_index,
         root_hash,
@@ -80,13 +80,79 @@ pub fn has_executable_body(normalized: &NormalizedNode) -> bool {
 }
 
 /// Whether a body statement does nothing observable.
-fn is_inert_statement(stmt: &NormalizedNode) -> bool {
+#[must_use]
+pub fn is_inert_statement(stmt: &NormalizedNode) -> bool {
     if INERT_STATEMENT_KINDS.contains(&stmt.kind) {
         return true;
     }
     // A bare `...` or string expression evaluates to a discarded value.
     stmt.kind == "expression_statement"
         && stmt.children.iter().all(|child| matches!(child.kind, "ellipsis" | "string"))
+}
+
+/// The top-level statements of a normalized function body.
+///
+/// Empty when the function has no `block` child.
+pub fn body_statements(normalized: &NormalizedNode) -> &[NormalizedNode] {
+    normalized
+        .children
+        .iter()
+        .find(|child| child.kind == "block")
+        .map_or(&[], |block| block.children.as_slice())
+}
+
+/// Renumbers normalization placeholders relative to the run being hashed.
+///
+/// [`crate::normalize`] numbers locals with a counter that runs over the whole
+/// function, parameters first, so the *same* code gets different placeholders
+/// depending on what precedes it. A trailing run therefore shares almost nothing
+/// with the standalone function containing the same statements — measured at 0.211
+/// containment on `tests/fixtures/containment_prepend.py`, against a 0.85 threshold.
+///
+/// Reassigning in first-encounter order within the run makes a run's fingerprint
+/// independent of its position in the parent body, which is what lets a leading run
+/// and a trailing run of the same code compare equal.
+///
+/// Note this interacts with `sort_commutative`: assignment follows source order while
+/// the hash follows sorted order, so `a + b` and `b + a` still fingerprint differently
+/// under a run remap. `sort_commutative` defaults to off.
+#[derive(Default)]
+struct Remap {
+    indices: FxHashMap<String, u32>,
+}
+
+impl Remap {
+    /// The run-relative index for a placeholder, assigning one on first encounter.
+    ///
+    /// Returns `None` for anything that is not a placeholder — globals, attribute
+    /// names and literals keep their text.
+    fn index_of(&mut self, text: &str) -> Option<u32> {
+        if !text.starts_with('$') {
+            return None;
+        }
+        let next = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
+        Some(*self.indices.entry(text.to_owned()).or_insert(next))
+    }
+}
+
+/// Fingerprint a contiguous run of top-level body statements.
+///
+/// The run is hashed with run-relative placeholder numbering (see [`Remap`]), so the
+/// result depends only on the statements themselves, not on where they sit in the
+/// enclosing function. Comparing two such fingerprints is therefore meaningful in
+/// both directions; comparing one against a whole-function [`HashedFunction`]
+/// fingerprint is **not**, because those use function-relative numbering.
+pub fn hash_statement_run(
+    statements: &[NormalizedNode],
+    min_subtree_nodes: usize,
+    sort_commutative: bool,
+) -> FxHashSet<u64> {
+    let mut hashes = FxHashSet::default();
+    let mut remap = Some(Remap::default());
+    for statement in statements {
+        hash_node(statement, min_subtree_nodes, sort_commutative, &mut hashes, &mut remap);
+    }
+    hashes
 }
 
 /// Compute a hash from kind + separator, with no child information.
@@ -103,11 +169,16 @@ fn hash_kind_only(kind: &str) -> u64 {
 /// - `full_hash`: unlimited-depth hash for exact matching
 /// - `depth_hashes[d]`: hash seeing only `d` levels of descendants
 /// - `node_count`: total nodes in this subtree
+///
+/// `remap` is `Some` only when fingerprinting a statement run, which renumbers
+/// placeholders relative to the run; whole-function hashing passes `None` and is
+/// bit-for-bit unaffected.
 fn hash_node(
     node: &NormalizedNode,
     min_nodes: usize,
     sort_commutative: bool,
     hashes: &mut FxHashSet<u64>,
+    remap: &mut Option<Remap>,
 ) -> (u64, [u64; SUBTREE_HASH_DEPTH + 1], usize) {
     if node.children.is_empty() {
         // Leaf node: hash kind + text. Same at all depths.
@@ -115,7 +186,15 @@ fn hash_node(
         let mut buf = Vec::with_capacity(node.kind.len() + 1 + text.len());
         buf.extend_from_slice(node.kind.as_bytes());
         buf.push(0);
-        buf.extend_from_slice(text.as_bytes());
+        match remap.as_mut().and_then(|r| r.index_of(text)) {
+            // Encode the run-relative index numerically: no allocation, and it can
+            // never collide with a real identifier, since `$` is not valid in one.
+            Some(index) => {
+                buf.push(b'$');
+                buf.extend_from_slice(&index.to_le_bytes());
+            }
+            None => buf.extend_from_slice(text.as_bytes()),
+        }
         let hash = xxhash_rust::xxh3::xxh3_64(&buf);
         if min_nodes <= 1 {
             hashes.insert(hash);
@@ -128,7 +207,7 @@ fn hash_node(
         Vec::with_capacity(node.children.len());
     let mut total_count = 1usize;
     for child in &node.children {
-        let (full_h, depth_h, count) = hash_node(child, min_nodes, sort_commutative, hashes);
+        let (full_h, depth_h, count) = hash_node(child, min_nodes, sort_commutative, hashes, remap);
         child_data.push((full_h, depth_h));
         total_count += count;
     }
