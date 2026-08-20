@@ -108,10 +108,12 @@ impl<'a> FunctionBody<'a> {
 
     /// Line span (0-indexed, inclusive) of a run's *executable* statements.
     ///
-    /// Docstrings and comments are excluded from both ends. They contribute nothing
-    /// to the fingerprint, and counting them towards the size floor lets a two-line
-    /// idiom under a sixteen-line docstring clear a fifteen-line floor — which is how
-    /// stock boilerplate slips past a guard meant to suppress exactly that.
+    /// Statements that do nothing — `pass`, `...`, a bare string — are excluded from
+    /// both ends, as docstrings and comments already are by normalization dropping
+    /// them entirely. They contribute nothing to the fingerprint, and counting them
+    /// towards the size floor lets a two-line idiom under a sixteen-line docstring
+    /// clear a fifteen-line floor — which is how stock boilerplate slips past a guard
+    /// meant to suppress exactly that.
     ///
     /// `None` when the run holds no executable statement at all.
     fn span(&self, role: FragmentRole, length: usize) -> Option<(usize, usize)> {

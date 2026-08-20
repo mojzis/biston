@@ -78,6 +78,45 @@ fn containment_finds_an_appended_container() {
 }
 
 #[test]
+fn containment_span_skips_the_prose_it_no_longer_normalizes() {
+    // The container carries a docstring and comments the contained function does not.
+    // Normalization drops them, so `body_statement_spans` has to drop them as well:
+    // if the two walks disagree the run is reported against the wrong lines, or the
+    // finding is dropped with only a `tracing::warn!` behind it.
+    let config = config_for_file_with_containment("containment_prose.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    let found = describe_containments(&report);
+    assert_eq!(found.len(), 1, "expected exactly one finding, got {found:?}");
+
+    let source = std::fs::read_to_string(fixtures_path().join("containment_prose.py"))
+        .expect("read fixture");
+    // 1-indexed line of the container's first and last shared statements. Derived
+    // from the fixture rather than hard-coded, so the assertion says what it means.
+    let line_of = |needle: &str| -> usize {
+        source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.trim_start().starts_with(needle))
+            .map(|(index, _)| index + 1)
+            .last()
+            .unwrap_or_else(|| panic!("fixture must contain {needle}"))
+    };
+    let first_statement = line_of("cleaned = []");
+    let last_statement = line_of("cleaned.sort(");
+
+    let (inner, outer, role, start, end) = &found[0];
+    assert_eq!(inner, "normalize_records");
+    assert_eq!(outer, "normalize_and_index_records");
+    assert_eq!(*role, "prefix");
+    assert_eq!(
+        (*start, *end),
+        (first_statement, last_statement),
+        "the run must span the container's executable statements, not its prose"
+    );
+    assert_eq!(report.containments[0].statement_count, 3, "docstring must not count as one");
+}
+
+#[test]
 fn containment_finds_a_prepended_container() {
     // B = C + A: A is the *trailing* run of B's body. Every local in that run is
     // registered after C's, so this only works with run-relative renumbering.
@@ -274,6 +313,44 @@ fn docstring_only_functions_are_not_reported_as_clones() {
 }
 
 #[test]
+fn comment_and_docstring_noise_still_matches_exactly() {
+    // The two functions differ only in a docstring and comments. Normalization drops
+    // both outright, so they must reach the *exact* path — a near-miss score here
+    // means a placeholder node survived and perturbed the hashes.
+    let config = config_for_file("comment_noise.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert_eq!(report.functions.len(), 2, "fixture should yield two functions");
+    assert_eq!(report.pairs.len(), 1, "expected one pair, got {:?}", report.pairs.len());
+    assert!(
+        (report.pairs[0].similarity - 1.0).abs() < f64::EPSILON,
+        "expected an exact match, got {}",
+        report.pairs[0].similarity
+    );
+}
+
+#[test]
+fn bodies_left_empty_by_stripping_are_scanned_without_panicking() {
+    // Once the prose is dropped these bodies are empty blocks. That is a valid tree,
+    // and it stays unreportable — exactly as a docstring-only body was before.
+    let config = config_for_file("no_logic_bodies.py");
+    let report = biston::scan(&fixtures_path(), &config).unwrap();
+    assert_eq!(report.functions.len(), 2, "fixture should yield two functions");
+    assert!(
+        report.pairs.is_empty(),
+        "a body with no logic is not reportable, got {:?}",
+        report
+            .pairs
+            .iter()
+            .map(|p| (
+                report.functions[p.left].name.as_str(),
+                report.functions[p.right].name.as_str(),
+                p.similarity
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn detects_near_miss() {
     let config = config_for_file("near_miss.py");
     let report = biston::scan(&fixtures_path(), &config).unwrap();
@@ -355,6 +432,9 @@ fn suggest_on_simple_clones_produces_suggestions() {
 
 #[test]
 fn test_inline_suppress_excludes_function() {
+    // Also a regression test for prose removal: `# biston: ignore` leaves no node
+    // behind in the normalized tree any more, and suppression must not care —
+    // it reads the directive from the source, not from what normalization kept.
     let config = config_for_file("suppressed_inline.py");
     let report = biston::scan(&fixtures_path(), &config).unwrap();
     assert_eq!(
@@ -363,6 +443,7 @@ fn test_inline_suppress_excludes_function() {
         "expected 1 function after inline suppression, got {}",
         report.functions.len()
     );
+    assert_eq!(report.functions[0].name, "process_data_alpha", "the wrong function survived");
     assert!(report.pairs.is_empty(), "expected 0 pairs with only 1 function remaining");
     assert_eq!(report.suppression_stats.inline_functions, 1);
 }

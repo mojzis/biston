@@ -5,7 +5,8 @@ use crate::config::NormalizationConfig;
 /// A normalized representation of a tree-sitter node, suitable for hashing.
 ///
 /// Local identifiers are replaced with positional placeholders, comments and
-/// docstrings are stripped, and other normalizations are applied according to config.
+/// docstrings are dropped outright (they leave no node behind at all), and other
+/// normalizations are applied according to config.
 #[derive(Debug, Clone)]
 pub struct NormalizedNode {
     /// The tree-sitter node kind (e.g. `identifier`, `binary_operator`).
@@ -14,7 +15,8 @@ pub struct NormalizedNode {
     pub text: Option<String>,
     /// Normalized children.
     pub children: Vec<Self>,
-    /// Byte range in the original source. `None` for stripped nodes.
+    /// Byte range in the original source. `None` for the placeholder nodes that
+    /// stand in for stripped decorators and type annotations.
     pub byte_range: Option<std::ops::Range<usize>>,
 }
 
@@ -84,21 +86,6 @@ fn normalize_node(
 ) -> NormalizedNode {
     let kind = node.kind();
 
-    // Strip comments
-    if kind == "comment" {
-        return NormalizedNode { kind: "comment", text: None, children: vec![], byte_range: None };
-    }
-
-    // Strip docstrings (expression_statement containing a single string at function body start)
-    if kind == "expression_statement" && is_docstring(node) {
-        return NormalizedNode {
-            kind: "docstring",
-            text: None,
-            children: vec![],
-            byte_range: None,
-        };
-    }
-
     // Strip type annotations
     if config.strip_type_annotations && is_type_annotation_node(kind) {
         return NormalizedNode { kind, text: None, children: vec![], byte_range: None };
@@ -158,25 +145,72 @@ fn normalize_node(
         return NormalizedNode { kind, text: Some(text), children: vec![], byte_range: range };
     }
 
-    // Leaf node (named node with no named children, not identifier/literal)
-    if node.named_child_count() == 0 {
-        return NormalizedNode {
-            kind,
-            text: Some(node_text(node, source)),
-            children: vec![],
-            byte_range: range,
-        };
-    }
-
-    // Internal node — recurse into named children
+    // Recurse into named children, dropping the ones that leave no trace at all.
+    // Comments and docstrings are removed here rather than kept as empty
+    // placeholder nodes: a placeholder still perturbs every ancestor hash, so two
+    // functions differing only in prose would never match exactly.
     let mut children = Vec::new();
+    let mut stripped = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        let normalized = normalize_node(child, source, config, scope);
-        children.push(normalized);
+        if leaves_no_trace(child) {
+            stripped.push(child.start_byte()..child.end_byte());
+            continue;
+        }
+        children.push(normalize_node(child, source, config, scope));
+    }
+
+    if children.is_empty() {
+        // Either a genuine leaf, or a node whose every named child was stripped —
+        // `[  # note\n]`. The latter must normalize like its prose-free form, so the
+        // text is rebuilt without the stripped spans instead of reading the comment
+        // straight back in. Both cases go through the same rebuild: making it
+        // conditional on a comment being present is what would let `[\n]` and
+        // `[\n    # note\n]` — the same code, one comment apart — hash differently.
+        //
+        // An emptied `block` (`def f(): """doc"""`) is a valid tree and stays one:
+        // no `pass` is synthesized for it, because `def f(): pass` is different code
+        // and must keep a different hash.
+        let text = structural_text(node, source, &stripped);
+        return NormalizedNode { kind, text: Some(text), children: vec![], byte_range: range };
     }
 
     NormalizedNode { kind, text: None, children, byte_range: range }
+}
+
+/// Whether a node is dropped from the normalized tree entirely.
+///
+/// Comments and docstrings are prose. Two functions that differ only in prose are
+/// the same code, so nothing of them may survive normalization — not even an empty
+/// placeholder node, whose presence alone changes every hash above it.
+///
+/// [`crate::scan`] mirrors this predicate when it records a line span per body
+/// statement; the two must agree or the spans stop lining up with the statements.
+pub(crate) fn leaves_no_trace(node: tree_sitter::Node<'_>) -> bool {
+    node.kind() == "comment" || is_docstring(node)
+}
+
+/// A node's text with the given spans and all whitespace removed.
+///
+/// Used for every childless node, which by this point means punctuation (`[]`, `()`)
+/// or a keyword token (`pass`, `...`) — identifiers, literals and strings, where
+/// inner whitespace is load-bearing, have all returned earlier. Dropping the
+/// whitespace unconditionally is what makes `[  # note\n]`, `[\n]` and `[]` produce
+/// the same leaf, so a comment cannot change a hash by way of the layout around it.
+fn structural_text(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    stripped: &[std::ops::Range<usize>],
+) -> String {
+    let start = node.start_byte();
+    node_text(node, source)
+        .char_indices()
+        .filter(|&(offset, character)| {
+            !character.is_whitespace()
+                && !stripped.iter().any(|span| span.contains(&(start + offset)))
+        })
+        .map(|(_, character)| character)
+        .collect()
 }
 
 /// Check if an identifier node is the name of a `function_definition`.
@@ -397,33 +431,268 @@ mod tests {
         assert!(texts.contains(&"join".to_owned()));
     }
 
-    #[test]
-    fn comments_stripped() {
-        fn has_comment_text(node: &NormalizedNode) -> bool {
-            if node.kind == "comment" && node.text.is_some() {
-                return true;
-            }
-            node.children.iter().any(has_comment_text)
-        }
+    /// Whether any node in the tree has this kind.
+    fn contains_kind(node: &NormalizedNode, kind: &str) -> bool {
+        node.kind == kind || node.children.iter().any(|child| contains_kind(child, kind))
+    }
 
-        let source = "def foo():\n    # this is a comment\n    x = 1\n    return x\n";
+    /// Normalize a source snippet's first function and hash the result.
+    fn root_hash(source: &str) -> u64 {
         let parsed = parse(source);
         let func = get_function_node(&parsed);
         let normalized = normalize_function(func, &parsed.source, &default_config());
-        assert!(!has_comment_text(&normalized));
+        crate::hash::hash_function(&normalized, 0, 5, false).root_hash
+    }
+
+    /// Normalize a source snippet's first function.
+    fn normalize_source(source: &str) -> NormalizedNode {
+        let parsed = parse(source);
+        let func = get_function_node(&parsed);
+        normalize_function(func, &parsed.source, &default_config())
     }
 
     #[test]
-    fn docstring_stripped() {
+    fn comments_leave_no_node_behind() {
+        // A `comment` placeholder would still perturb every hash above it, which is
+        // what kept two otherwise identical functions out of the exact-clone path.
+        let source = "def foo():\n    # this is a comment\n    x = 1\n    return x\n";
+        let normalized = normalize_source(source);
+        assert!(
+            !contains_kind(&normalized, "comment"),
+            "comment must leave no node at all, got {normalized:?}"
+        );
+    }
+
+    #[test]
+    fn docstring_leaves_no_node_behind() {
         let source = "def foo():\n    \"\"\"This is a docstring.\"\"\"\n    return 42\n";
-        let parsed = parse(source);
-        let func = get_function_node(&parsed);
-        let normalized = normalize_function(func, &parsed.source, &default_config());
+        let normalized = normalize_source(source);
+        assert!(
+            !contains_kind(&normalized, "docstring"),
+            "docstring must leave no node at all, got {normalized:?}"
+        );
 
         let mut texts = Vec::new();
         collect_leaf_texts(&normalized, &mut texts);
-        // The docstring text should not appear
         assert!(!texts.iter().any(|t| t.contains("This is a docstring")));
+    }
+
+    #[test]
+    fn inline_comment_does_not_change_the_hash() {
+        let without = "def foo(items):\n    total = 0\n    for item in items:\n        total += item\n    return total\n";
+        let with = "def foo(items):\n    total = 0  # running sum\n    for item in items:\n        total += item\n    return total\n";
+        assert_eq!(normalize_source(without), normalize_source(with));
+        assert_eq!(
+            root_hash(without),
+            root_hash(with),
+            "an inline comment must not change the hash"
+        );
+    }
+
+    #[test]
+    fn docstring_does_not_change_the_hash() {
+        let without = "def foo(items):\n    total = 0\n    for item in items:\n        total += item\n    return total\n";
+        let with = "def foo(items):\n    \"\"\"Sum the items.\"\"\"\n    total = 0\n    for item in items:\n        total += item\n    return total\n";
+        assert_eq!(normalize_source(without), normalize_source(with));
+        assert_eq!(root_hash(without), root_hash(with), "a docstring must not change the hash");
+    }
+
+    #[test]
+    fn comments_in_nested_blocks_do_not_change_the_hash() {
+        let without = concat!(
+            "def foo(items):\n",
+            "    total = 0\n",
+            "    for item in items:\n",
+            "        if item > 0:\n",
+            "            total += item\n",
+            "    def helper(value):\n",
+            "        return value * 2\n",
+            "    return helper(total)\n",
+        );
+        let with = concat!(
+            "def foo(items):\n",
+            "    # leading\n",
+            "    total = 0\n",
+            "    for item in items:\n",
+            "        # inside the loop\n",
+            "        if item > 0:\n",
+            "            # inside the branch\n",
+            "            total += item  # trailing\n",
+            "    def helper(value):\n",
+            "        # inside the nested def\n",
+            "        return value * 2\n",
+            "    return helper(total)\n",
+        );
+        assert_eq!(normalize_source(without), normalize_source(with));
+        assert_eq!(root_hash(without), root_hash(with), "nested comments must not change the hash");
+    }
+
+    #[test]
+    fn nested_function_docstring_leaves_no_trace() {
+        let without = concat!(
+            "def foo(items):\n",
+            "    def helper(value):\n",
+            "        return value * 2\n",
+            "    return [helper(item) for item in items]\n",
+        );
+        let with = concat!(
+            "def foo(items):\n",
+            "    \"\"\"Outer prose.\"\"\"\n",
+            "    def helper(value):\n",
+            "        \"\"\"Inner prose about doubling.\"\"\"\n",
+            "        return value * 2\n",
+            "    return [helper(item) for item in items]\n",
+        );
+        let normalized = normalize_source(with);
+        assert!(!contains_kind(&normalized, "docstring"));
+        let mut texts = Vec::new();
+        collect_leaf_texts(&normalized, &mut texts);
+        assert!(!texts.iter().any(|t| t.contains("Inner prose")), "got {texts:?}");
+        assert_eq!(normalize_source(without), normalized);
+        assert_eq!(root_hash(without), root_hash(with));
+    }
+
+    #[test]
+    fn comment_between_decorators_does_not_change_the_hash() {
+        // Normalization starts at the `function_definition`, so a *top-level*
+        // decorated definition never enters the tree at all. A nested one does, and
+        // that is the path this pins: the decorator placeholders stay (deliberately
+        // out of scope here), the comment between them does not.
+        let without = concat!(
+            "def outer(values):\n",
+            "    @first\n",
+            "    @second\n",
+            "    def inner(value):\n",
+            "        return value + 1\n",
+            "    return [inner(value) for value in values]\n",
+        );
+        let with = concat!(
+            "def outer(values):\n",
+            "    @first\n",
+            "    # why the second one\n",
+            "    @second\n",
+            "    def inner(value):\n",
+            "        return value + 1\n",
+            "    return [inner(value) for value in values]\n",
+        );
+        assert!(
+            contains_kind(&normalize_source(with), "decorator"),
+            "the nested decorator must still reach the tree, or this pins nothing"
+        );
+        assert_eq!(normalize_source(without), normalize_source(with));
+        assert_eq!(root_hash(without), root_hash(with));
+    }
+
+    #[test]
+    fn comment_alone_inside_a_collection_matches_the_empty_form() {
+        // tree-sitter surfaces this comment as the `list`'s only named child, so the
+        // node has to fall back to the punctuation an empty list would produce.
+        let one_line = "def foo():\n    x = []\n    return x\n";
+        let spread = "def foo():\n    x = [\n    ]\n    return x\n";
+        let commented = "def foo():\n    x = [\n        # nothing yet\n    ]\n    return x\n";
+        assert_eq!(normalize_source(one_line), normalize_source(commented));
+        assert_eq!(root_hash(one_line), root_hash(commented));
+        // The multi-line spelling is the only one a comment can appear in, so it is
+        // the one that matters: `[\n]` and `[\n  # note\n]` must not diverge either.
+        assert_eq!(normalize_source(spread), normalize_source(commented));
+        assert_eq!(root_hash(spread), root_hash(commented));
+    }
+
+    #[test]
+    fn comment_alone_inside_an_argument_list_matches_the_empty_form() {
+        let spread = "def foo():\n    return g(\n    )\n";
+        let commented = "def foo():\n    return g(\n        # no arguments\n    )\n";
+        assert_eq!(normalize_source(spread), normalize_source(commented));
+        assert_eq!(root_hash(spread), root_hash(commented));
+    }
+
+    #[test]
+    fn whitespace_collapsing_does_not_reach_string_leaves() {
+        // Strings return before the childless-node path, so their inner whitespace is
+        // untouched. Without that, `"a b"` and `"ab"` would collapse into one hash.
+        assert_ne!(
+            root_hash("def foo():\n    x = 1\n    return \"a b\"\n"),
+            root_hash("def foo():\n    x = 1\n    return \"ab\"\n"),
+        );
+    }
+
+    #[test]
+    fn comment_alone_inside_the_parameter_list_matches_the_empty_form() {
+        let without = "def foo():\n    return 1\n";
+        let with = "def foo(\n    # no parameters on purpose\n):\n    return 1\n";
+        assert_eq!(normalize_source(without), normalize_source(with));
+        assert_eq!(root_hash(without), root_hash(with));
+    }
+
+    #[test]
+    fn docstring_only_body_normalizes_to_an_empty_block() {
+        // An empty body is a valid tree. No `pass` is synthesized for it.
+        let normalized = normalize_source("def foo():\n    \"\"\"Only prose.\"\"\"\n");
+        let block = normalized
+            .children
+            .iter()
+            .find(|child| child.kind == "block")
+            .expect("function must keep its block");
+        assert!(block.children.is_empty(), "docstring-only body must be empty, got {block:?}");
+    }
+
+    #[test]
+    fn docstring_only_body_differs_from_pass() {
+        // Negative case: over-stripping would collapse these two into one hash, but
+        // `def f(): """doc"""` and `def f(): pass` are different code.
+        assert_ne!(
+            root_hash("def foo():\n    \"\"\"Only prose.\"\"\"\n"),
+            root_hash("def foo():\n    pass\n"),
+            "an empty body must not be confused with a `pass` body"
+        );
+    }
+
+    #[test]
+    fn comment_before_pass_matches_a_bare_pass() {
+        assert_eq!(
+            root_hash("def foo():\n    # nothing to do yet\n    pass\n"),
+            root_hash("def foo():\n    pass\n"),
+        );
+    }
+
+    #[test]
+    fn an_emptied_body_differs_from_an_ellipsis_body() {
+        // The three no-logic spellings stay distinct from one another: nothing is
+        // synthesized to paper over an emptied block.
+        let docstring_only = root_hash("def foo():\n    \"\"\"Only prose.\"\"\"\n");
+        let ellipsis_only = root_hash("def foo():\n    ...\n");
+        let pass_only = root_hash("def foo():\n    pass\n");
+        assert_ne!(docstring_only, ellipsis_only);
+        assert_ne!(ellipsis_only, pass_only);
+    }
+
+    #[test]
+    fn string_that_is_not_a_docstring_is_preserved() {
+        // Negative case: only the *first* statement of a block is a docstring. A bare
+        // string later in the body is an expression and must survive.
+        let source = "def foo():\n    x = 1\n    \"not a docstring\"\n    return x\n";
+        let normalized = normalize_source(source);
+        let mut texts = Vec::new();
+        collect_leaf_texts(&normalized, &mut texts);
+        assert!(
+            texts.iter().any(|t| t.contains("not a docstring")),
+            "a mid-body string is an expression, not prose: got {texts:?}"
+        );
+        assert_ne!(
+            root_hash(source),
+            root_hash("def foo():\n    x = 1\n    return x\n"),
+            "dropping a mid-body string would be over-stripping"
+        );
+    }
+
+    #[test]
+    fn string_expression_after_a_docstring_is_preserved() {
+        let source = "def foo():\n    \"\"\"Prose.\"\"\"\n    \"second string\"\n    return 1\n";
+        let normalized = normalize_source(source);
+        let mut texts = Vec::new();
+        collect_leaf_texts(&normalized, &mut texts);
+        assert!(!texts.iter().any(|t| t.contains("Prose")), "got {texts:?}");
+        assert!(texts.iter().any(|t| t.contains("second string")), "got {texts:?}");
     }
 
     #[test]
