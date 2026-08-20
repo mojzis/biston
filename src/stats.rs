@@ -13,8 +13,20 @@ pub struct ScanStats {
     pub files_scanned: usize,
     /// Number of functions extracted.
     pub functions_extracted: usize,
-    /// Number of clone pairs detected.
+    /// Number of symmetric clone pairs detected.
+    ///
+    /// Deliberately excludes containment findings, which are counted separately by
+    /// `containment_findings`. Existing CI gates read this field, so folding a new
+    /// kind of finding into it would silently change what they enforce.
+    ///
+    /// Enabling containment does still *reduce* this count, by the number of pairs
+    /// superseded by a directed finding for the same two functions. That direction is
+    /// safe for a gate — it never reports more than before — but it is not zero.
     pub clone_pairs: usize,
+    /// Number of directed containment findings.
+    ///
+    /// Always zero unless containment detection is enabled.
+    pub containment_findings: usize,
     /// Number of clone clusters (groups of mutually similar functions).
     pub clone_clusters: usize,
     /// Number of distinct functions involved in at least one clone pair.
@@ -93,6 +105,7 @@ pub fn compute_stats(report: &CloneReport) -> ScanStats {
         files_scanned: report.files_scanned,
         functions_extracted: report.functions.len(),
         clone_pairs: report.pairs.len(),
+        containment_findings: report.containments.len(),
         clone_clusters: clusters.len(),
         functions_in_clones: involved.len(),
         files_with_clones,
@@ -109,6 +122,7 @@ pub fn format_stats_text(stats: &ScanStats) -> String {
     let _ = writeln!(out, "  Functions extracted:   {}", stats.functions_extracted);
     let _ = writeln!(out, "  Clone pairs:          {}", stats.clone_pairs);
     let _ = writeln!(out, "  Clone clusters:       {}", stats.clone_clusters);
+    let _ = writeln!(out, "  Containment findings: {}", stats.containment_findings);
     let _ = writeln!(
         out,
         "  Functions in clones:  {} ({:.1}%)",
@@ -173,6 +187,7 @@ mod tests {
             functions: vec![],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -196,6 +211,7 @@ mod tests {
             functions: vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 1.0)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -231,6 +247,7 @@ mod tests {
                 make_pair(0, 2, 0.95), // near
                 make_pair(2, 3, 0.75), // similar
             ],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -259,6 +276,7 @@ mod tests {
             functions: vec![make_func("a", "same.py", 0, 10), make_func("b", "same.py", 20, 30)],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.85)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -278,6 +296,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -296,6 +315,7 @@ mod tests {
             functions: vec![make_func("a", "a.py", 0, 10), make_func("b", "b.py", 0, 10)],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.95)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -315,6 +335,7 @@ mod tests {
             functions: vec![make_func("a", "a.py", 0, 10), make_func("b", "b.py", 0, 10)],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -332,6 +353,7 @@ mod tests {
             functions: vec![make_func("a", "a.py", 0, 10), make_func("b", "b.py", 0, 10)],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -351,6 +373,7 @@ mod tests {
             functions: vec![make_func("a", "a.py", 0, 10)],
             normalized: vec![],
             pairs: vec![],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };
@@ -372,6 +395,7 @@ mod tests {
             ],
             normalized: vec![],
             pairs: vec![make_pair(0, 1, 0.9)],
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         };

@@ -40,6 +40,7 @@ Options:
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
       --tests-only             Restrict the scan to Python test files (overrides include/exclude)
+      --containment            Also report functions already implemented by a run of another
       --suggest                Generate abstraction suggestions for similar pairs
       --files <FILE>           Only emit pairs involving this file (repeat for multiple)
       --files-from <PATH>      Read focus file list from PATH, or `-` for stdin
@@ -62,6 +63,7 @@ Options:
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
       --tests-only             Restrict the scan to Python test files (overrides include/exclude)
+      --containment            Also report functions already implemented by a run of another
       --files <FILE>           Only emit pairs involving this file (repeat for multiple)
       --files-from <PATH>      Read focus file list from PATH, or `-` for stdin
   -h, --help                   Print help
@@ -136,6 +138,21 @@ Settings can go in `biston.toml` or under `[tool.biston]` in `pyproject.toml`. I
 | `min_quality` | `0.6` | Minimum template coverage score (0.0–1.0) |
 | `max_holes` | `5` | Maximum holes before suppressing |
 | `render_python` | `true` | Render templates as Python source |
+
+### `[containment]`
+
+Directed detection: one function already implements the leading or trailing run of
+another's body. Off by default; see [Containment](https://mojzis.github.io/biston/containment.html).
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable containment detection (or pass `--containment`) |
+| `min_fragment_lines` | `15` | Minimum executable lines in the matched run |
+| `min_ratio` | `0.30` | Contained function size / container size |
+| `threshold` | `0.85` | Minimum containment coefficient (0.0–1.0) |
+| `size_balance` | `1.25` | Largest tolerated size ratio between the function and the run |
+| `max_run_fraction` | `0.85` | Largest share of the container's statements a run may span |
+| `max_probes_per_function` | `12` | Cap on candidate-generating probes per function |
 
 ### `[suppress]`
 

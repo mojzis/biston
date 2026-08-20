@@ -11,6 +11,78 @@ pub struct Config {
     pub output: OutputConfig,
     pub suggest: SuggestConfig,
     pub suppress: SuppressConfig,
+    pub containment: ContainmentConfig,
+}
+
+/// Detection of one function already implementing the leading or trailing run of
+/// another's body.
+///
+/// Off by default. When disabled, no fragment work is performed at all — the cost
+/// is structurally zero rather than computed-and-discarded.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ContainmentConfig {
+    /// Whether containment detection runs.
+    pub enabled: bool,
+    /// Minimum line span of the matched run.
+    ///
+    /// Deliberately higher than `scan.min_lines`: a short shared run is stock
+    /// boilerplate (`with open(...)`, read, `json.loads`), and "extract this" is not
+    /// useful advice about boilerplate.
+    pub min_fragment_lines: usize,
+    /// The contained function must be at least this fraction of the container.
+    ///
+    /// Below it, what was found is a detail of a much larger function rather than an
+    /// abstraction waiting to be named.
+    pub min_ratio: f64,
+    /// Minimum containment coefficient, `|A ∩ F| / min(|A|, |F|)`.
+    ///
+    /// Separate from — and stricter than — `scan.threshold`, which scores the
+    /// symmetric relation with Jaccard.
+    pub threshold: f64,
+    /// Largest tolerated size ratio between the contained function and the matched run.
+    ///
+    /// The containment coefficient alone cannot exclude *interior* containment: if the
+    /// run strictly contains the function, `min(|A|,|F|) == |A|` and the coefficient is
+    /// 1.0 however much extra the run carries. Requiring the two to be comparable in
+    /// size is what keeps a match anchored to the run's boundary.
+    pub size_balance: f64,
+    /// Largest fraction of the container's statements a run may span.
+    ///
+    /// A run covering nearly the whole body is the whole function again, which is the
+    /// symmetric detector's job.
+    pub max_run_fraction: f64,
+    /// Cap on candidate-generating probes per function, across both roles.
+    pub max_probes_per_function: usize,
+}
+
+impl Default for ContainmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_fragment_lines: 15,
+            min_ratio: 0.30,
+            threshold: 0.85,
+            size_balance: 1.25,
+            max_run_fraction: 0.85,
+            max_probes_per_function: 12,
+        }
+    }
+}
+
+impl ContainmentConfig {
+    /// The minimum tolerated `min(|A|,|F|) / max(|A|,|F|)`.
+    ///
+    /// Returns 0.0 for a non-positive `size_balance`, which disables the guard rather
+    /// than dividing by zero.
+    #[must_use]
+    pub fn size_balance_floor(&self) -> f64 {
+        if self.size_balance > 0.0 {
+            1.0 / self.size_balance
+        } else {
+            0.0
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

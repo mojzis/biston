@@ -117,6 +117,117 @@ fn scan_help_exits_zero() {
         .stdout(predicate::str::contains("Scan a directory"));
 }
 
+// --- Containment tests ---
+
+/// A directory holding one function plus a second that ends by doing the same work.
+fn containment_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = std::fs::read_to_string(format!("{}/containment_prepend.py", fixtures_dir()))
+        .expect("read fixture");
+    let (inner, outer) =
+        source.split_once("\n\ndef load_then_normalize_records").expect("split fixture");
+    std::fs::write(dir.path().join("contained.py"), inner).expect("write contained");
+    std::fs::write(
+        dir.path().join("container.py"),
+        format!("def load_then_normalize_records{outer}"),
+    )
+    .expect("write container");
+    dir
+}
+
+#[test]
+fn scan_without_containment_flag_reports_nothing_directed() {
+    let dir = containment_dir();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already implemented by").not());
+}
+
+#[test]
+fn scan_with_containment_flag_reports_the_direction() {
+    let dir = containment_dir();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", "--containment", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("is already implemented by normalize_records"))
+        .stdout(predicate::str::contains("call it instead"));
+}
+
+#[test]
+fn stats_counts_containment_separately_from_clone_pairs() {
+    let dir = containment_dir();
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .args(["stats", "--containment", "--format", "json", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["containment_findings"], 1, "got: {parsed}");
+    assert_eq!(parsed["clone_pairs"], 0, "containment must not inflate clone_pairs: {parsed}");
+}
+
+#[test]
+fn overview_with_containment_never_calls_a_file_with_findings_clean() {
+    // `--containment` reaches `overview` too, and supersession removes the symmetric
+    // pair. If overview does not render containment, the flag *deletes* the finding
+    // and then reports the file as clean — strictly worse than not supporting it.
+    let dir = containment_dir();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["overview", "--containment", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already-implemented runs"))
+        .stdout(predicate::str::contains("already implemented by normalize_records"))
+        .stdout(predicate::str::contains("clean files not shown").not());
+}
+
+#[test]
+fn overview_containment_json_counts_findings() {
+    let dir = containment_dir();
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .args(["overview", "--containment", "--format", "json", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["summary"]["containment_findings"], 1, "got: {parsed}");
+    let total: u64 = parsed["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["containment_count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(total, 2, "both sides of the finding should be marked: {parsed}");
+}
+
+#[test]
+fn scan_containment_json_declares_schema_version_two() {
+    let dir = containment_dir();
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", "--containment", "--format", "json", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["schema_version"], 2);
+    assert_eq!(parsed["containments"][0]["role"], "suffix", "got: {parsed}");
+}
+
 #[test]
 fn scan_empty_dir_no_clones() {
     let dir = tempfile::tempdir().unwrap();

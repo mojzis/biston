@@ -31,8 +31,9 @@ Each stage lives in its own module:
 | parse | `src/parse.rs` | Feeds each file into tree-sitter-python, yields a concrete syntax tree. |
 | extract | `src/extract.rs` | Slices out every `function_definition` as a `FunctionFragment`. |
 | normalize | `src/normalize.rs` | Converts each fragment into a `NormalizedNode` tree — a canonical form. |
-| hash + LSH | `src/hash.rs` | xxhash3 over the normalized tree plus a banded LSH fingerprint. |
-| similarity | `src/similarity.rs` | Pairs candidates that share LSH bands, scores them against a threshold. |
+| hash | `src/hash.rs` | xxhash3 over the normalized tree: one full-depth root hash for exact matching, plus a set of depth-truncated subtree hashes as the fingerprint. |
+| similarity | `src/similarity.rs` | MinHash over the fingerprint, banded LSH for bucketing, exact Jaccard for scoring. |
+| containment | `src/containment.rs` | Finds functions that already implement a leading or trailing run of another's body (opt-in via `--containment`). |
 | anti-unify | `src/antiunify.rs` | Merges matched pairs into a template with typed holes (Phase 2, opt-in via `--suggest`). |
 | report | `src/report.rs` | Emits `CloneReport` as text / JSON / SARIF. |
 
@@ -86,18 +87,22 @@ function_definition
 
 With `anonymize_literals = true` and `sort_commutative = true` the two fragments hash to the same value. Without them they still land in the same LSH bucket because most of their structure coincides.
 
-## Similarity via LSH bands
+## Similarity via MinHash and LSH bands
 
 Comparing every function pairwise is O(n²) and unaffordable on a real repo. biston folds the problem into a locality-sensitive hash:
 
-1. The normalized tree is serialised into a stream of node-kind tokens.
-2. `xxhash3` produces a 64-bit fingerprint over that stream, plus a handful of shorter per-band hashes over slices of the same sequence.
-3. Fragments whose fingerprints agree on *any one* band land in the same bucket.
-4. Pairs are scored only within buckets.
+1. `src/hash.rs` walks the normalized tree bottom-up and collects a **set** of depth-truncated subtree hashes — one per subtree of at least five nodes, each capturing three levels of structure below it. That set is the function's fingerprint. There is no token stream and no ordering: the fingerprint is a set, so reordering a body's statements barely changes it.
+2. `src/similarity.rs` reduces each fingerprint to a 128-entry MinHash signature.
+3. The signature is cut into contiguous **bands**. Two functions that agree on *any one* band land in the same bucket.
+4. Pairs are scored only within buckets, using exact Jaccard over the full fingerprints.
 
-A higher band count means more candidate pairs (recall up, precision down); a longer band means fewer hits (recall down, precision up). The defaults are tuned so that a 1 000-file repo produces hundreds of candidate pairs, not millions.
+The band layout is derived from `threshold` rather than configured directly, and the permutation count is internal — there is no user-facing band knob. A larger band count means more candidate pairs (recall up, precision down); longer bands mean fewer hits (recall down, precision up).
 
 Only pairs whose similarity meets the `threshold` (default `0.7`) end up in the report.
+
+### What is not reportable
+
+A function whose body is only a docstring, `pass`, `...` or comments is skipped before either phase. Normalization strips the prose, so every such body reduces to the *same* tree however different the text is — which makes them exact matches of one another. There is no logic in them to extract, so pairing them is noise rather than a finding.
 
 ## Anti-unification
 

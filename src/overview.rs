@@ -22,17 +22,41 @@ pub struct CloneAnnotation {
     pub partner_file: String,
 }
 
+/// Annotation describing a function already implemented elsewhere.
+pub struct ContainmentAnnotation {
+    /// Name of the function that already implements this run.
+    pub partner_name: String,
+    /// Whether this function is the container (rather than the contained one).
+    pub is_container: bool,
+}
+
 /// A function entry in the overview, with optional clone annotation.
 pub struct FunctionEntry {
     pub func_index: usize,
     pub best_clone: Option<CloneAnnotation>,
+    /// Set when this function takes part in a containment finding.
+    pub containment: Option<ContainmentAnnotation>,
 }
 
-/// Per-file overview: functions sorted by start line, with clone count.
+/// Per-file overview: functions sorted by start line, with finding counts.
 pub struct FileOverview {
     pub file_path: PathBuf,
     pub functions: Vec<FunctionEntry>,
+    /// Functions involved in a symmetric clone pair.
     pub clone_count: usize,
+    /// Functions involved in a containment finding.
+    pub containment_count: usize,
+}
+
+impl FileOverview {
+    /// Whether the file has anything to report.
+    ///
+    /// Containment counts: a file holding a confirmed duplication must never be
+    /// filed away as clean just because the finding is directed rather than
+    /// symmetric.
+    fn has_findings(&self) -> bool {
+        self.clone_count > 0 || self.containment_count > 0
+    }
 }
 
 /// Build a bidirectional map from function index to clone partners.
@@ -45,9 +69,25 @@ fn build_clone_map(pairs: &[SimilarPair]) -> FxHashMap<usize, Vec<(usize, f64)>>
     clone_map
 }
 
+/// Map each function involved in a containment finding to its partner.
+///
+/// Both sides are recorded: the contained function is worth surfacing ("this is
+/// duplicated inside something else") and so is the container ("part of this is
+/// already written elsewhere"). Where a function takes part in several findings,
+/// the first in report order wins — findings arrive sorted by score descending.
+fn build_containment_map(report: &CloneReport) -> FxHashMap<usize, (usize, bool)> {
+    let mut map: FxHashMap<usize, (usize, bool)> = FxHashMap::default();
+    for finding in &report.containments {
+        map.entry(finding.container).or_insert((finding.contained, true));
+        map.entry(finding.contained).or_insert((finding.container, false));
+    }
+    map
+}
+
 /// Compute a file-centric overview from a clone report.
 pub fn compute_overview(report: &CloneReport) -> Vec<FileOverview> {
     let clone_map = build_clone_map(&report.pairs);
+    let containment_map = build_containment_map(report);
 
     // Group functions by file_path
     let mut file_groups: FxHashMap<PathBuf, Vec<usize>> = FxHashMap::default();
@@ -80,18 +120,27 @@ pub fn compute_overview(report: &CloneReport) -> Vec<FileOverview> {
                                     .to_string(),
                             })
                     });
-                    FunctionEntry { func_index: idx, best_clone }
+                    let containment = containment_map.get(&idx).map(|&(partner, is_container)| {
+                        ContainmentAnnotation {
+                            partner_name: report.functions[partner].name.clone(),
+                            is_container,
+                        }
+                    });
+                    FunctionEntry { func_index: idx, best_clone, containment }
                 })
                 .collect();
 
             let clone_count = functions.iter().filter(|e| e.best_clone.is_some()).count();
-            FileOverview { file_path, functions, clone_count }
+            let containment_count = functions.iter().filter(|e| e.containment.is_some()).count();
+            FileOverview { file_path, functions, clone_count, containment_count }
         })
         .collect();
 
-    // Sort: clone_count desc, then path asc
+    // Sort: total findings desc, then path asc
     overviews.sort_by(|a, b| {
-        b.clone_count.cmp(&a.clone_count).then_with(|| a.file_path.cmp(&b.file_path))
+        (b.clone_count + b.containment_count)
+            .cmp(&(a.clone_count + a.containment_count))
+            .then_with(|| a.file_path.cmp(&b.file_path))
     });
 
     overviews
@@ -111,25 +160,33 @@ pub fn format_overview_text(
     let total_pairs = report.pairs.len();
 
     let mut out = String::new();
-    let _ = writeln!(
+    let _ = write!(
         out,
-        "{bold}Overview: {total_files} files, {total_functions} functions, {total_pairs} clone pairs{reset}"
+        "{bold}Overview: {total_files} files, {total_functions} functions, {total_pairs} clone pairs"
     );
+    if !report.containments.is_empty() {
+        let _ = write!(out, ", {} already-implemented runs", report.containments.len());
+    }
+    let _ = writeln!(out, "{reset}");
 
-    let files_with_clones: Vec<&FileOverview> =
-        overviews.iter().filter(|f| f.clone_count > 0).collect();
-    let clean_count = total_files - files_with_clones.len();
+    let files_with_findings: Vec<&FileOverview> =
+        overviews.iter().filter(|f| f.has_findings()).collect();
+    let clean_count = total_files - files_with_findings.len();
 
-    for file in &files_with_clones {
+    for file in &files_with_findings {
         let _ = writeln!(out);
         let func_count = file.functions.len();
-        let _ = writeln!(
+        let _ = write!(
             out,
             "{bold}{:<40}{reset} {} functions, {} in clones",
             file.file_path.display(),
             func_count,
             file.clone_count
         );
+        if file.containment_count > 0 {
+            let _ = write!(out, ", {} already implemented", file.containment_count);
+        }
+        let _ = writeln!(out);
 
         for entry in &file.functions {
             let func = &report.functions[entry.func_index];
@@ -144,6 +201,19 @@ pub fn format_overview_text(
                     "  {bullet_color}\u{25cf}{reset} {:<18} {}-{}   \u{2248}{:.2} \u{2194} {}",
                     func.name, start, end, ann.similarity, ann.partner_name
                 );
+            } else if let Some(ref ann) = entry.containment {
+                // The arrow points from the duplicated code towards the function
+                // that already implements it.
+                let (arrow, partner) = if ann.is_container {
+                    ("\u{21a6}", format!("already implemented by {}", ann.partner_name))
+                } else {
+                    ("\u{21a4}", format!("already implements part of {}", ann.partner_name))
+                };
+                let _ = writeln!(
+                    out,
+                    "  {yellow}\u{25cb}{reset} {:<18} {}-{}   {arrow} {partner}",
+                    func.name, start, end
+                );
             } else {
                 let _ = writeln!(out, "  {dim}  {:<18} {}-{}{reset}", func.name, start, end);
             }
@@ -157,7 +227,7 @@ pub fn format_overview_text(
 
     // Teach the reader how to silence a false positive — only when there's
     // something to suppress.
-    if !files_with_clones.is_empty() {
+    if !files_with_findings.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, "{}", crate::suppress::suppression_hint());
     }
@@ -178,6 +248,8 @@ struct JsonOverviewSummary {
     files: usize,
     functions: usize,
     clone_pairs: usize,
+    /// Directed findings. Zero unless containment detection is enabled.
+    containment_findings: usize,
 }
 
 #[derive(Serialize)]
@@ -185,6 +257,7 @@ struct JsonFileOverview {
     file_path: String,
     functions: Vec<JsonFunctionEntry>,
     clone_count: usize,
+    containment_count: usize,
 }
 
 #[derive(Serialize)]
@@ -216,6 +289,7 @@ pub fn format_overview_json(
             files: overviews.len(),
             functions: total_functions,
             clone_pairs: report.pairs.len(),
+            containment_findings: report.containments.len(),
         },
         files: overviews
             .iter()
@@ -255,6 +329,7 @@ pub fn format_overview_json(
                     file_path: file.file_path.display().to_string(),
                     functions,
                     clone_count: file.clone_count,
+                    containment_count: file.containment_count,
                 }
             })
             .collect(),
@@ -293,6 +368,7 @@ mod tests {
             functions,
             normalized: vec![],
             pairs,
+            containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
         }

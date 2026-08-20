@@ -1,4 +1,4 @@
-.PHONY: review fmt-check lint test audit deny coverage mutants review-quick
+.PHONY: review fmt-check lint test audit deny coverage mutants review-quick bench
 
 # Full review — run before pushing or merging
 review: fmt-check lint test audit deny
@@ -58,3 +58,8 @@ mutants:
 	else \
 		echo "⚠️  cargo-mutants not installed. Run: cargo install cargo-mutants"; \
 	fi
+
+bench:
+	@echo "📊 Running the precision/recall benchmark (clones CPython Lib/ on first run)..."
+	@cargo build --release
+	@python3 -m bench $(BENCH_ARGS)

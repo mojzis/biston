@@ -1,4 +1,4 @@
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::normalize::NormalizedNode;
 
@@ -14,7 +14,21 @@ pub struct HashedFunction {
     /// below it. A leaf change propagates at most that many levels up, avoiding
     /// the cascade problem where a single change invalidates every ancestor hash.
     pub subtree_hashes: FxHashSet<u64>,
+    /// Whether the body holds at least one statement that actually does something.
+    ///
+    /// A body made up only of a docstring, `pass`, `...` or comments normalizes to
+    /// the *same* tree as every other such body — the prose is stripped, so nothing
+    /// distinguishes them. Their fingerprint is a single hash of the function
+    /// outline, and their root hashes are equal, so clone detection pairs them all
+    /// at 1.0. There is no logic in them to extract, so they are not reportable.
+    pub has_executable_body: bool,
 }
+
+/// Statement kinds that carry no executable logic.
+///
+/// `docstring` and `comment` are synthesized by normalization, which strips their
+/// text; `pass_statement` is a no-op by definition.
+const INERT_STATEMENT_KINDS: &[&str] = &["docstring", "comment", "pass_statement"];
 
 /// Node kinds where child order is irrelevant for clone detection.
 const COMMUTATIVE_KINDS: &[&str] = &["binary_operator", "boolean_operator"];
@@ -44,8 +58,107 @@ pub fn hash_function(
 ) -> HashedFunction {
     let mut subtree_hashes = FxHashSet::default();
     let (root_hash, _depth_hashes, _count) =
-        hash_node(normalized, min_subtree_nodes, sort_commutative, &mut subtree_hashes);
-    HashedFunction { fragment_index, root_hash, subtree_hashes }
+        hash_node(normalized, min_subtree_nodes, sort_commutative, &mut subtree_hashes, &mut None);
+    HashedFunction {
+        fragment_index,
+        root_hash,
+        subtree_hashes,
+        has_executable_body: has_executable_body(normalized),
+    }
+}
+
+/// Whether a normalized function's body holds at least one executable statement.
+///
+/// Returns `false` when the function has no `block` child at all — a shape that
+/// carries no logic either way.
+fn has_executable_body(normalized: &NormalizedNode) -> bool {
+    normalized
+        .children
+        .iter()
+        .find(|child| child.kind == "block")
+        .is_some_and(|block| block.children.iter().any(|stmt| !is_inert_statement(stmt)))
+}
+
+/// Whether a body statement does nothing observable.
+pub(crate) fn is_inert_statement(stmt: &NormalizedNode) -> bool {
+    if INERT_STATEMENT_KINDS.contains(&stmt.kind) {
+        return true;
+    }
+    // A bare `...` or string expression evaluates to a discarded value.
+    stmt.kind == "expression_statement"
+        && stmt.children.iter().all(|child| matches!(child.kind, "ellipsis" | "string"))
+}
+
+/// The top-level statements of a normalized function body.
+///
+/// Empty when the function has no `block` child.
+pub(crate) fn body_statements(normalized: &NormalizedNode) -> &[NormalizedNode] {
+    normalized
+        .children
+        .iter()
+        .find(|child| child.kind == "block")
+        .map_or(&[], |block| block.children.as_slice())
+}
+
+/// Renumbers normalization placeholders relative to the run being hashed.
+///
+/// [`crate::normalize`] numbers locals with a counter that runs over the whole
+/// function, parameters first, so the *same* code gets different placeholders
+/// depending on what precedes it. A trailing run therefore shares almost nothing
+/// with the standalone function containing the same statements — measured at 0.211
+/// containment on `tests/fixtures/containment_prepend.py`, against a 0.85 threshold.
+///
+/// Reassigning in first-encounter order within the run makes a run's fingerprint
+/// independent of its position in the parent body, which is what lets a leading run
+/// and a trailing run of the same code compare equal.
+///
+/// Note this interacts with `sort_commutative`: assignment follows source order while
+/// the hash follows sorted order, so `a + b` and `b + a` still fingerprint differently
+/// under a run remap. `sort_commutative` defaults to off.
+#[derive(Default)]
+struct Remap {
+    indices: FxHashMap<String, u32>,
+}
+
+impl Remap {
+    /// The run-relative index for a placeholder, assigning one on first encounter.
+    ///
+    /// Returns `None` for anything that is not a placeholder — globals, attribute
+    /// names and literals keep their text.
+    fn index_of(&mut self, text: &str) -> Option<u32> {
+        if !text.starts_with('$') {
+            return None;
+        }
+        // Look up before inserting: `entry` needs an owned key, so going straight
+        // to it would allocate a String on every *occurrence* of every placeholder,
+        // not just the first.
+        if let Some(&index) = self.indices.get(text) {
+            return Some(index);
+        }
+        let next = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
+        self.indices.insert(text.to_owned(), next);
+        Some(next)
+    }
+}
+
+/// Fingerprint a contiguous run of top-level body statements.
+///
+/// The run is hashed with run-relative placeholder numbering (see [`Remap`]), so the
+/// result depends only on the statements themselves, not on where they sit in the
+/// enclosing function. Comparing two such fingerprints is therefore meaningful in
+/// both directions; comparing one against a whole-function [`HashedFunction`]
+/// fingerprint is **not**, because those use function-relative numbering.
+pub(crate) fn hash_statement_run(
+    statements: &[NormalizedNode],
+    min_subtree_nodes: usize,
+    sort_commutative: bool,
+) -> FxHashSet<u64> {
+    let mut hashes = FxHashSet::default();
+    let mut remap = Some(Remap::default());
+    for statement in statements {
+        hash_node(statement, min_subtree_nodes, sort_commutative, &mut hashes, &mut remap);
+    }
+    hashes
 }
 
 /// Compute a hash from kind + separator, with no child information.
@@ -62,11 +175,16 @@ fn hash_kind_only(kind: &str) -> u64 {
 /// - `full_hash`: unlimited-depth hash for exact matching
 /// - `depth_hashes[d]`: hash seeing only `d` levels of descendants
 /// - `node_count`: total nodes in this subtree
+///
+/// `remap` is `Some` only when fingerprinting a statement run, which renumbers
+/// placeholders relative to the run; whole-function hashing passes `None` and is
+/// bit-for-bit unaffected.
 fn hash_node(
     node: &NormalizedNode,
     min_nodes: usize,
     sort_commutative: bool,
     hashes: &mut FxHashSet<u64>,
+    remap: &mut Option<Remap>,
 ) -> (u64, [u64; SUBTREE_HASH_DEPTH + 1], usize) {
     if node.children.is_empty() {
         // Leaf node: hash kind + text. Same at all depths.
@@ -74,7 +192,15 @@ fn hash_node(
         let mut buf = Vec::with_capacity(node.kind.len() + 1 + text.len());
         buf.extend_from_slice(node.kind.as_bytes());
         buf.push(0);
-        buf.extend_from_slice(text.as_bytes());
+        match remap.as_mut().and_then(|r| r.index_of(text)) {
+            // Encode the run-relative index numerically: no allocation, and it can
+            // never collide with a real identifier, since `$` is not valid in one.
+            Some(index) => {
+                buf.push(b'$');
+                buf.extend_from_slice(&index.to_le_bytes());
+            }
+            None => buf.extend_from_slice(text.as_bytes()),
+        }
         let hash = xxhash_rust::xxh3::xxh3_64(&buf);
         if min_nodes <= 1 {
             hashes.insert(hash);
@@ -87,7 +213,7 @@ fn hash_node(
         Vec::with_capacity(node.children.len());
     let mut total_count = 1usize;
     for child in &node.children {
-        let (full_h, depth_h, count) = hash_node(child, min_nodes, sort_commutative, hashes);
+        let (full_h, depth_h, count) = hash_node(child, min_nodes, sort_commutative, hashes, remap);
         child_data.push((full_h, depth_h));
         total_count += count;
     }
@@ -139,6 +265,73 @@ mod tests {
 
     fn node(kind: &'static str, children: Vec<NormalizedNode>) -> NormalizedNode {
         NormalizedNode { kind, text: None, children, byte_range: None }
+    }
+
+    /// Two statements shaped like `$a = f($b)` / `$b = g($a, $b)`, using the given
+    /// placeholder numbers. Big enough for the `min_nodes` floor to admit subtrees.
+    fn statement_run(first: &str, second: &str) -> Vec<NormalizedNode> {
+        let assign = |target: &str, func: &str, args: Vec<&str>| {
+            node(
+                "expression_statement",
+                vec![node(
+                    "assignment",
+                    vec![
+                        leaf("identifier", target),
+                        node(
+                            "call",
+                            vec![
+                                leaf("identifier", func),
+                                node(
+                                    "argument_list",
+                                    args.into_iter().map(|a| leaf("identifier", a)).collect(),
+                                ),
+                            ],
+                        ),
+                    ],
+                )],
+            )
+        };
+        vec![assign(first, "f", vec![second]), assign(second, "g", vec![first, second])]
+    }
+
+    // --- Run-relative renumbering ---
+
+    #[test]
+    fn run_fingerprint_is_invariant_under_placeholder_shift() {
+        // The same code preceded by different statements gets different placeholder
+        // numbers from normalization. A run's fingerprint must not depend on that,
+        // or a trailing run can never match the standalone function containing it.
+        let low = hash_statement_run(&statement_run("$0", "$1"), 5, false);
+        let shifted = hash_statement_run(&statement_run("$3", "$4"), 5, false);
+        assert!(!low.is_empty(), "fixture must produce a non-empty fingerprint");
+        assert_eq!(low, shifted, "run fingerprint must not depend on absolute placeholder numbers");
+    }
+
+    #[test]
+    fn run_fingerprint_still_distinguishes_a_different_reuse_pattern() {
+        // Renumbering must not go so far as to erase *which* variable is which:
+        // `$a = f($b)` and `$a = f($a)` are different code.
+        let distinct = hash_statement_run(&statement_run("$0", "$1"), 5, false);
+        let same_variable = hash_statement_run(&statement_run("$0", "$0"), 5, false);
+        assert_ne!(distinct, same_variable, "reuse pattern must survive renumbering");
+    }
+
+    #[test]
+    fn whole_function_hashing_is_unaffected_by_the_remap() {
+        // `hash_function` passes `None`, so absolute placeholder numbers still matter
+        // there — that path must stay bit-for-bit as it was.
+        let build = |a: &str, b: &str| {
+            node(
+                "function_definition",
+                vec![leaf("identifier", "<fn>"), node("block", statement_run(a, b))],
+            )
+        };
+        let low = hash_function(&build("$0", "$1"), 0, 5, false);
+        let shifted = hash_function(&build("$3", "$4"), 0, 5, false);
+        assert_ne!(
+            low.root_hash, shifted.root_hash,
+            "whole-function hashing must not silently acquire run-relative behaviour"
+        );
     }
 
     #[test]
