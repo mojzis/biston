@@ -431,7 +431,9 @@ fn process_file(
 /// Line span (0-indexed, inclusive) of each top-level statement in a function body.
 ///
 /// Parallel to [`hash::body_statements`] of the same function: normalization keeps one
-/// node per named child of the `block`, including comments and docstrings.
+/// node per named child of the `block` *except* the ones it drops entirely, so the
+/// same statements are skipped here — otherwise the spans stop lining up with the
+/// statements they describe and containment reports the wrong lines.
 fn body_statement_spans(func_node: tree_sitter::Node<'_>) -> Vec<(usize, usize)> {
     let Some(block) = func_node.child_by_field_name("body") else {
         return vec![];
@@ -439,6 +441,7 @@ fn body_statement_spans(func_node: tree_sitter::Node<'_>) -> Vec<(usize, usize)>
     let mut cursor = block.walk();
     block
         .named_children(&mut cursor)
+        .filter(|statement| !normalize::leaves_no_trace(*statement))
         .map(|statement| (statement.start_position().row, statement.end_position().row))
         .collect()
 }

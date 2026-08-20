@@ -249,6 +249,55 @@ fn scan_fixtures_detects_clones() {
         .stdout(predicate::str::contains("Clone cluster #1"));
 }
 
+/// A tempdir holding a single copy of one fixture, so a scan sees only that file.
+fn fixture_in_tempdir(name: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source =
+        std::fs::read_to_string(format!("{}/{name}", fixtures_dir())).expect("read fixture");
+    std::fs::write(dir.path().join(name), source).expect("write fixture");
+    dir
+}
+
+#[test]
+fn scan_reports_comment_only_differences_as_an_exact_clone() {
+    // Through the CLI: two functions differing only in a docstring and comments must
+    // be printed as an exact clone at 100% similarity, not as a near miss.
+    let dir = fixture_in_tempdir("comment_noise.py");
+
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Clone cluster #1"))
+        .stdout(predicate::str::contains("aggregate_totals"))
+        .stdout(predicate::str::contains("aggregate_sums"))
+        .stdout(predicate::str::contains("similarity: 1.00"));
+}
+
+#[test]
+fn scan_json_reports_comment_only_differences_at_similarity_one() {
+    let dir = fixture_in_tempdir("comment_noise.py");
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", dir.path().to_str().unwrap(), "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let clusters = json["clusters"].as_array().expect("clusters array");
+    assert_eq!(clusters.len(), 1, "expected exactly one cluster, got {json}");
+    let similarity = clusters[0]["similarity"].as_f64().expect("similarity");
+    assert!((similarity - 1.0).abs() < f64::EPSILON, "expected 1.0, got {similarity}");
+    let names: Vec<&str> = clusters[0]["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .map(|f| f["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, vec!["aggregate_totals", "aggregate_sums"], "got {json}");
+}
+
 #[test]
 fn scan_json_format_valid() {
     Command::cargo_bin("biston")

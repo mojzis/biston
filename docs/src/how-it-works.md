@@ -53,6 +53,7 @@ Two functions can be "the same shape" and still differ in all the surface detail
 What the pass does by default:
 
 - Replaces local names with canonical placeholders (`v0`, `v1`, …).
+- Drops comments and docstrings entirely — they leave no node behind, so two functions differing only in prose hash identically.
 - Drops decorators and type annotations.
 - Optionally anonymizes literals and sorts commutative operators (toggled in config).
 - Records the kind of each node as a `&'static str` so comparisons stay cheap.
@@ -102,7 +103,7 @@ Only pairs whose similarity meets the `threshold` (default `0.7`) end up in the 
 
 ### What is not reportable
 
-A function whose body is only a docstring, `pass`, `...` or comments is skipped before either phase. Normalization strips the prose, so every such body reduces to the *same* tree however different the text is — which makes them exact matches of one another. There is no logic in them to extract, so pairing them is noise rather than a finding.
+A function whose body is only a docstring, `pass`, `...` or comments is skipped before either phase. Normalization drops the prose outright, so what is left of such a body is the function outline over statements that do nothing — however different the text was. There is no logic in them to extract, so pairing them is noise rather than a finding.
 
 ## Anti-unification
 

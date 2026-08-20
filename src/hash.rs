@@ -16,19 +16,21 @@ pub struct HashedFunction {
     pub subtree_hashes: FxHashSet<u64>,
     /// Whether the body holds at least one statement that actually does something.
     ///
-    /// A body made up only of a docstring, `pass`, `...` or comments normalizes to
-    /// the *same* tree as every other such body — the prose is stripped, so nothing
-    /// distinguishes them. Their fingerprint is a single hash of the function
-    /// outline, and their root hashes are equal, so clone detection pairs them all
-    /// at 1.0. There is no logic in them to extract, so they are not reportable.
+    /// A body made up only of a docstring, `pass`, `...` or comments is left with
+    /// nothing but the function outline: the prose is dropped outright, and what
+    /// remains is inert. Two such bodies do not necessarily share a root hash —
+    /// an emptied block, `pass` and `...` are each their own shape — but the
+    /// distinction is beside the point, because there is no logic in any of them
+    /// to extract. Pairing them is noise, so they are not reportable at all.
     pub has_executable_body: bool,
 }
 
 /// Statement kinds that carry no executable logic.
 ///
-/// `docstring` and `comment` are synthesized by normalization, which strips their
-/// text; `pass_statement` is a no-op by definition.
-const INERT_STATEMENT_KINDS: &[&str] = &["docstring", "comment", "pass_statement"];
+/// Comments and docstrings never reach here: normalization drops them outright, so a
+/// body of nothing but prose arrives as a `block` with no children at all. What is
+/// left to name is `pass_statement`, a no-op by definition.
+const INERT_STATEMENT_KINDS: &[&str] = &["pass_statement"];
 
 /// Node kinds where child order is irrelevant for clone detection.
 const COMMUTATIVE_KINDS: &[&str] = &["binary_operator", "boolean_operator"];
