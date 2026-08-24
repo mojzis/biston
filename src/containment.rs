@@ -20,10 +20,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::config::ContainmentConfig;
 use crate::hash::{hash_statement_run, is_inert_statement};
+use crate::measure::distinct_line_count;
 use crate::normalize::NormalizedNode;
 use crate::similarity::{
     hash_band, log_index_occupancy, lsh_params_for_threshold, minhash_signature, MinHashSignature,
 };
+use crate::tier::{accept_run, Tier};
 
 /// Minimum subtree size for a hash to enter a fingerprint.
 ///
@@ -66,8 +68,13 @@ pub struct FunctionBody<'a> {
     pub fragment_index: usize,
     /// Top-level statements of the body, in source order.
     pub statements: &'a [NormalizedNode],
-    /// Line span (0-indexed, inclusive) of each statement, parallel to `statements`.
-    pub statement_spans: &'a [(usize, usize)],
+    /// Executable lines (0-indexed, ascending) of each statement, parallel to
+    /// `statements`.
+    ///
+    /// Line *numbers* rather than a span: a run's size is the number of distinct
+    /// lines its statements occupy, and two statements sharing a line
+    /// (`a = 1; b = 2`) must not count that line twice.
+    pub statement_lines: &'a [Vec<usize>],
     /// Line count of the whole function.
     pub function_lines: usize,
     /// Fingerprint of the entire body, with run-relative placeholder numbering.
@@ -79,15 +86,15 @@ impl<'a> FunctionBody<'a> {
     fn new(
         fragment_index: usize,
         statements: &'a [NormalizedNode],
-        statement_spans: &'a [(usize, usize)],
+        statement_lines: &'a [Vec<usize>],
         function_lines: usize,
         sort_commutative: bool,
     ) -> Option<Self> {
-        if statements.len() != statement_spans.len() {
+        if statements.len() != statement_lines.len() {
             tracing::warn!(
-                "statement/span mismatch for fragment {fragment_index}: {} vs {}",
+                "statement/line mismatch for fragment {fragment_index}: {} vs {}",
                 statements.len(),
-                statement_spans.len()
+                statement_lines.len()
             );
             return None;
         }
@@ -95,7 +102,7 @@ impl<'a> FunctionBody<'a> {
         if fingerprint.is_empty() {
             return None;
         }
-        Some(Self { fragment_index, statements, statement_spans, function_lines, fingerprint })
+        Some(Self { fragment_index, statements, statement_lines, function_lines, fingerprint })
     }
 
     /// The statement range covered by a run of `length` statements in `role`.
@@ -106,28 +113,32 @@ impl<'a> FunctionBody<'a> {
         }
     }
 
-    /// Line span (0-indexed, inclusive) of a run's *executable* statements.
+    /// Executable line lists of a run's *executable* statements.
     ///
-    /// Statements that do nothing — `pass`, `...`, a bare string — are excluded from
-    /// both ends, as docstrings and comments already are by normalization dropping
-    /// them entirely. They contribute nothing to the fingerprint, and counting them
-    /// towards the size floor lets a two-line idiom under a sixteen-line docstring
-    /// clear a fifteen-line floor — which is how stock boilerplate slips past a guard
-    /// meant to suppress exactly that.
-    ///
-    /// `None` when the run holds no executable statement at all.
-    fn span(&self, role: FragmentRole, length: usize) -> Option<(usize, usize)> {
-        let range = self.range(role, length);
-        let executable = range.filter(|&i| !is_inert_statement(&self.statements[i]));
-        let mut spans = executable.map(|i| self.statement_spans[i]);
-        let first = spans.next()?;
-        let last = spans.next_back().unwrap_or(first);
-        Some((first.0, last.1))
+    /// Statements that do nothing — `pass`, `...`, a bare string — are excluded, as
+    /// docstrings and comments already are by normalization dropping them entirely.
+    /// They contribute nothing to the fingerprint, and counting them towards the size
+    /// floor lets a two-line idiom under a sixteen-line docstring clear a fifteen-line
+    /// floor — which is how stock boilerplate slips past a guard meant to suppress
+    /// exactly that.
+    fn run_lines(&self, role: FragmentRole, length: usize) -> impl Iterator<Item = &[usize]> {
+        self.range(role, length)
+            .filter(|&i| !is_inert_statement(&self.statements[i]))
+            .map(|i| self.statement_lines[i].as_slice())
     }
 
-    /// Line count of a run's executable statements, or 0 when it has none.
+    /// Line span (0-indexed, inclusive) of a run's executable statements.
+    ///
+    /// `None` when the run holds no executable line at all.
+    fn span(&self, role: FragmentRole, length: usize) -> Option<(usize, usize)> {
+        let mut lines = self.run_lines(role, length).flatten().copied();
+        let first = lines.next()?;
+        Some((first, lines.last().unwrap_or(first)))
+    }
+
+    /// Executable lines a run spans, in the units the acceptance tiers use.
     fn line_count(&self, role: FragmentRole, length: usize) -> usize {
-        self.span(role, length).map_or(0, |(start, end)| end.saturating_sub(start) + 1)
+        distinct_line_count(self.run_lines(role, length))
     }
 
     /// Number of executable statements in a run.
@@ -215,33 +226,35 @@ pub struct ContainmentFinding {
     pub statement_count: usize,
     /// Containment coefficient, `|A ∩ F| / min(|A|, |F|)`.
     pub score: f64,
+    /// The acceptance tier that admitted this finding.
+    pub tier: Tier,
 }
 
 /// Prepare per-function bodies for analysis.
 ///
-/// `spans` supplies the line span of each top-level statement, parallel to the
-/// statements of the corresponding normalized function.
+/// `statement_lines` supplies the executable lines of each top-level statement,
+/// parallel to the statements of the corresponding normalized function.
 #[must_use]
 pub fn prepare_bodies<'a>(
     fragment_indices: &[usize],
     statements: &[&'a [NormalizedNode]],
-    spans: &[&'a [(usize, usize)]],
+    statement_lines: &[&'a [Vec<usize>]],
     function_lines: &[usize],
     sort_commutative: bool,
 ) -> Vec<FunctionBody<'a>> {
     debug_assert!(
         fragment_indices.len() == statements.len()
-            && statements.len() == spans.len()
-            && spans.len() == function_lines.len(),
+            && statements.len() == statement_lines.len()
+            && statement_lines.len() == function_lines.len(),
         "prepare_bodies requires four parallel slices; `zip` would silently truncate"
     );
     fragment_indices
         .iter()
         .zip(statements)
-        .zip(spans)
+        .zip(statement_lines)
         .zip(function_lines)
-        .filter_map(|(((&index, &stmts), &spans), &lines)| {
-            FunctionBody::new(index, stmts, spans, lines, sort_commutative)
+        .filter_map(|(((&index, &stmts), &stmt_lines), &lines)| {
+            FunctionBody::new(index, stmts, stmt_lines, lines, sort_commutative)
         })
         .collect()
 }
@@ -350,7 +363,10 @@ fn is_eligible_run(
     if fraction > config.max_run_fraction {
         return false;
     }
-    body.line_count(role, length) >= config.min_fragment_lines
+    // The *lowest* floor either tier could accept: a run below it can never be
+    // reported, and one above it is decided by `accept_run`, not here. Checking the
+    // stricter floor here would put a second, older gate in front of the tiers.
+    body.line_count(role, length) >= config.candidate_fragment_floor()
 }
 
 /// Every run length worth evaluating for one host and role, with its fingerprint.
@@ -410,26 +426,35 @@ fn score_candidate(
     }
 
     let balance_floor = config.size_balance_floor();
-    let mut best: Option<(f64, f64, usize)> = None;
+    let mut best: Option<(f64, f64, usize, Tier)> = None;
     for (length, fragment) in runs {
         let length = *length;
         let Some((score, balance)) = compare(&contained.fingerprint, fragment) else {
             continue;
         };
-        if score < config.threshold || balance < balance_floor {
+        // The size-balance guard is independent of the tiers and composes with them:
+        // a run either tier would take is still dropped when it fails here.
+        if balance < balance_floor {
             continue;
         }
+        // Identical fingerprints of identical size is the strongest statement this
+        // stage can make that the run *is* the function, which is what buys the
+        // exact tier's lower floor.
+        let exact = (score - 1.0).abs() < f64::EPSILON && (balance - 1.0).abs() < f64::EPSILON;
+        let Some(tier) = accept_run(score, exact, host.line_count(role, length), config) else {
+            continue;
+        };
         // Prefer the highest containment, then the most balanced, then the shortest
         // run — the shortest is the tightest description of what was duplicated.
-        let better = best.is_none_or(|(best_score, best_balance, _)| {
+        let better = best.is_none_or(|(best_score, best_balance, _, _)| {
             (score, balance) > (best_score, best_balance)
         });
         if better {
-            best = Some((score, balance, length));
+            best = Some((score, balance, length, tier));
         }
     }
 
-    let (score, _, length) = best?;
+    let (score, _, length, tier) = best?;
     // `is_eligible_run` already rejected runs with no executable statement.
     let (start_line, end_line) = host.span(role, length)?;
     Some(ContainmentFinding {
@@ -440,6 +465,7 @@ fn score_candidate(
         end_line,
         statement_count: host.executable_count(role, length),
         score,
+        tier,
     })
 }
 
@@ -547,15 +573,16 @@ mod tests {
                 byte_range: None,
             })
             .collect();
-        let spans: Vec<(usize, usize)> = (0..16).map(|i| (i * 40, i * 40 + 39)).collect();
+        let lines: Vec<Vec<usize>> = (0..16).map(|i| (i * 40..i * 40 + 40).collect()).collect();
         let body = FunctionBody {
             fragment_index: 0,
             statements: &statements,
-            statement_spans: &spans,
+            statement_lines: &lines,
             function_lines: 640,
             fingerprint: (0..5).collect(),
         };
-        let config = ContainmentConfig { min_fragment_lines: 1, ..ContainmentConfig::default() };
+        let config =
+            ContainmentConfig { min_fragment_lines: Some(1), ..ContainmentConfig::default() };
         let ladder = probe_ladder(&body, FragmentRole::Prefix, &config);
         assert_eq!(ladder, vec![2, 4, 6, 8, 10, 12], "eighths of 16");
         assert!(ladder.len() <= config.max_probes_per_function / 2);
@@ -571,15 +598,16 @@ mod tests {
                 byte_range: None,
             })
             .collect();
-        let spans: Vec<(usize, usize)> = (0..4).map(|i| (i * 40, i * 40 + 39)).collect();
+        let lines: Vec<Vec<usize>> = (0..4).map(|i| (i * 40..i * 40 + 40).collect()).collect();
         let body = FunctionBody {
             fragment_index: 0,
             statements: &statements,
-            statement_spans: &spans,
+            statement_lines: &lines,
             function_lines: 160,
             fingerprint: (0..5).collect(),
         };
-        let config = ContainmentConfig { min_fragment_lines: 1, ..ContainmentConfig::default() };
+        let config =
+            ContainmentConfig { min_fragment_lines: Some(1), ..ContainmentConfig::default() };
         let ladder = probe_ladder(&body, FragmentRole::Prefix, &config);
         assert!(!ladder.contains(&4), "a 4-of-4 run is the whole body: {ladder:?}");
         assert!(ladder.iter().all(|&k| k < 4));
@@ -595,6 +623,7 @@ mod tests {
             end_line: 10,
             statement_count: 3,
             score,
+            tier: Tier::Similar,
         };
         let mut findings = vec![
             make(0, 1, 0.9, FragmentRole::Prefix),
@@ -621,6 +650,7 @@ mod tests {
             end_line: 10,
             statement_count: 3,
             score,
+            tier: Tier::Similar,
         };
         let mut findings = vec![make(4, 7, 0.88), make(7, 4, 0.93)];
         keep_best_per_pair(&mut findings);

@@ -213,7 +213,7 @@ fn overview_containment_json_counts_findings() {
 }
 
 #[test]
-fn scan_containment_json_declares_schema_version_two() {
+fn scan_containment_json_declares_the_current_schema_version() {
     let dir = containment_dir();
     let output = Command::cargo_bin("biston")
         .unwrap()
@@ -224,8 +224,12 @@ fn scan_containment_json_declares_schema_version_two() {
         .stdout
         .clone();
     let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(parsed["schema_version"], 2);
+    assert_eq!(parsed["schema_version"], 3);
     assert_eq!(parsed["containments"][0]["role"], "suffix", "got: {parsed}");
+    assert_eq!(
+        parsed["containments"][0]["tier"], "exact",
+        "every finding names the tier that accepted it: {parsed}"
+    );
 }
 
 #[test]
@@ -306,6 +310,48 @@ fn scan_json_format_valid() {
         .assert()
         .success()
         .stdout(predicate::str::starts_with("{"));
+}
+
+#[test]
+fn an_alias_conflict_warns_on_stderr_and_leaves_json_parseable() {
+    // The report is stdout and diagnostics are stderr. A warning printed into the
+    // report would make `--format json` unparseable for whatever consumes it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("biston.toml"), "[scan]\nmin_lines = 6\nexact_min_lines = 5\n")
+        .expect("write config");
+    std::fs::copy(format!("{}/tiers/exact_short.py", fixtures_dir()), dir.path().join("a.py"))
+        .expect("copy fixture");
+
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", dir.path().to_str().unwrap(), "--format", "json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("scan.min_lines is ignored"))
+        .stderr(predicate::str::contains("scan.exact_min_lines"))
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output).expect("stdout must be JSON and nothing else");
+    assert_eq!(parsed["schema_version"], 3);
+}
+
+#[test]
+fn contradictory_size_floors_fail_the_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("biston.toml"),
+        "[scan]\nexact_min_lines = 20\nsimilar_min_lines = 5\n",
+    )
+    .expect("write config");
+
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must not exceed"));
 }
 
 #[test]

@@ -82,7 +82,7 @@ A finding is reported only if it passes every one of these.
 |---|---|---|
 | containment coefficient `\|A ∩ F\| / min(\|A\|,\|F\|)` ≥ `threshold` | `0.85` | Separate from, and stricter than, the symmetric `threshold`, which scores with Jaccard. |
 | size balance `min/max` ≥ `1 / size_balance` | `1.25` → `0.80` | The coefficient alone **cannot** exclude interior containment: if the run strictly contains the function, the coefficient is 1.0 however much extra the run carries. Requiring comparable sizes is what anchors a match to the run's boundary. |
-| `min_fragment_lines` | `15` | Measured over the run's *executable* statements only. Docstrings and comments are excluded from both ends — otherwise a two-line idiom under a sixteen-line docstring clears a fifteen-line floor, which is exactly the boilerplate the guard exists to suppress. |
+| fragment floor (`exact_min_fragment_lines` / `similar_min_fragment_lines`) | `10` / `15` | Measured in *executable lines* — lines holding a token that survives normalization, so docstrings, comments and blank lines are excluded. Otherwise a two-line idiom under a sixteen-line docstring clears a fifteen-line floor, which is exactly the boilerplate the guard exists to suppress. Which of the two applies depends on the acceptance tier: see [How acceptance works](acceptance.md). |
 | `min_ratio` | `0.30` | Below this the contained function is a detail of a much larger one, not an abstraction waiting to be named. |
 | `max_run_fraction` | `0.85` | A run covering nearly the whole body is the whole function again — the symmetric detector's job. |
 | not lexically nested | — | A nested `def` is extracted in its own right *and* is a statement of its parent, so it always matches a run of the parent. That is not duplication. |
@@ -108,10 +108,11 @@ enforcing what they always enforced.
 
 ```toml
 [containment]
-enabled = false            # or pass --containment
-min_fragment_lines = 15    # executable lines in the matched run
-min_ratio = 0.30           # contained size / container size
-threshold = 0.85           # containment coefficient
+enabled = false                  # or pass --containment
+exact_min_fragment_lines = 10    # executable lines in an exactly matched run
+similar_min_fragment_lines = 15  # executable lines in a fuzzily matched run
+min_ratio = 0.30                 # contained size / container size
+threshold = 0.85                 # containment coefficient for the fuzzy tier
 size_balance = 1.25        # largest tolerated size ratio between A and the run
 max_run_fraction = 0.85    # largest share of the body a run may span
 max_probes_per_function = 12
@@ -121,14 +122,14 @@ max_probes_per_function = 12
 
 `text` phrases the finding as an instruction, as shown at the top of this page.
 
-`json` gains a `containments` array — and, from this release, a `schema_version`
-field. **Version 1 had no version field at all**, so an absent `schema_version`
-means pre-containment output. The array is omitted entirely when there are no
-findings.
+`json` gains a `containments` array — and a `schema_version` field. **Version 1 had
+no version field at all**, so an absent `schema_version` means pre-containment
+output; version 2 added `containments`; version 3 added `tier` to every finding. The
+array is omitted entirely when there are no findings.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "clusters": [],
   "containments": [
     {
@@ -138,7 +139,8 @@ findings.
       "start_line": 42,
       "end_line": 58,
       "statement_count": 4,
-      "score": 1.0
+      "score": 1.0,
+      "tier": "exact"
     }
   ]
 }

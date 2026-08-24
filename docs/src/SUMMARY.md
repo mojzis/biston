@@ -5,5 +5,6 @@
 # Getting Started
 
 - [How It Works](how-it-works.md)
+- [How acceptance works](acceptance.md)
 - [Containment](containment.md)
 - [Commit-hook integration](commit-hooks.md)

@@ -11,6 +11,7 @@ use crate::extract::FunctionFragment;
 use crate::normalize::NormalizedNode;
 use crate::similarity::SimilarPair;
 use crate::suppress::SuppressionStats;
+use crate::tier::Tier;
 
 /// A suggested abstraction for a pair of similar functions.
 pub struct Suggestion {
@@ -46,6 +47,13 @@ pub(crate) struct CloneCluster {
     pub members: Vec<usize>,
     /// Minimum pairwise similarity within the cluster.
     pub min_similarity: f64,
+    /// The weakest tier among the cluster's pairs.
+    ///
+    /// A cluster is an `exact` cluster only when every pair in it was accepted as
+    /// exact — the same reading as `min_similarity`, which reports the weakest pair
+    /// rather than the strongest. Reporting the strongest would let one exact pair
+    /// vouch for every fuzzy one grouped with it.
+    pub tier: Tier,
 }
 
 /// Group overlapping pairs into clusters using union-find.
@@ -87,20 +95,22 @@ pub(crate) fn cluster_pairs(pairs: &[SimilarPair], num_functions: usize) -> Vec<
             continue;
         }
 
-        // Find min similarity among pairs in this cluster
-        let min_sim = pairs
-            .iter()
-            .filter(|p| {
-                let pr = find(&mut parent, p.left);
-                let expected = find(&mut parent, unique_members[0]);
-                pr == expected
-            })
-            .map(|p| p.similarity)
-            .fold(f64::INFINITY, f64::min);
+        // Weakest evidence in the cluster, on both axes, in one pass over its pairs.
+        let expected = find(&mut parent, unique_members[0]);
+        let mut min_sim = f64::INFINITY;
+        let mut tier = Tier::Exact;
+        for pair in pairs {
+            if find(&mut parent, pair.left) != expected {
+                continue;
+            }
+            min_sim = min_sim.min(pair.similarity);
+            tier = tier.weaker(pair.tier);
+        }
 
         clusters.push(CloneCluster {
             members: unique_members,
             min_similarity: if min_sim.is_infinite() { 1.0 } else { min_sim },
+            tier,
         });
     }
 
@@ -200,8 +210,9 @@ pub fn format_text(report: &CloneReport, config: &OutputConfig) -> String {
     for (i, cluster) in clusters.iter().take(config.max_results).enumerate() {
         let _ = writeln!(
             output,
-            "{bold}Clone cluster #{} (similarity: {:.2}, {} functions){reset}",
+            "{bold}Clone cluster #{} (tier: {}, similarity: {:.2}, {} functions){reset}",
             i + 1,
+            cluster.tier.as_str(),
             cluster.min_similarity,
             cluster.members.len()
         );
@@ -291,11 +302,12 @@ fn append_containments(report: &CloneReport, config: &OutputConfig, output: &mut
         );
         let _ = writeln!(
             output,
-            "    ({} run of {}, {} statements, containment {:.2})",
+            "    ({} run of {}, {} statements, containment {:.2}, tier: {})",
             c.role.as_str(),
             outer.name,
             c.statement_count,
             c.score,
+            c.tier.as_str(),
         );
     }
     let _ = writeln!(output);
@@ -331,8 +343,9 @@ fn append_suppression_line(stats: &SuppressionStats, output: &mut String) {
 /// Version 1 had no version field at all, so an absent `schema_version` means
 /// "pre-containment": `clusters` / `suggestions` / `suppressed` only. Version 2 adds
 /// `containments`, a directed relation with a container, a contained function and the
-/// container's run span.
-pub const JSON_SCHEMA_VERSION: u32 = 2;
+/// container's run span. Version 3 adds `tier` — `exact` or `similar` — to every
+/// cluster and every containment, naming the acceptance rule that admitted it.
+pub const JSON_SCHEMA_VERSION: u32 = 3;
 
 /// JSON output structures.
 #[derive(Serialize)]
@@ -366,6 +379,8 @@ struct JsonContainment {
     statement_count: usize,
     /// Containment coefficient, `|A ∩ F| / min(|A|, |F|)`.
     score: f64,
+    /// Which acceptance tier admitted this finding: `exact` or `similar`.
+    tier: Tier,
 }
 
 #[derive(Serialize, Default)]
@@ -384,6 +399,8 @@ impl JsonSuppressed {
 #[derive(Serialize)]
 struct JsonCluster {
     similarity: f64,
+    /// Weakest acceptance tier among the cluster's pairs: `exact` or `similar`.
+    tier: Tier,
     functions: Vec<JsonFunction>,
 }
 
@@ -433,7 +450,7 @@ pub fn format_json(report: &CloneReport, config: &OutputConfig) -> anyhow::Resul
                 })
                 .collect();
 
-            JsonCluster { similarity: cluster.min_similarity, functions }
+            JsonCluster { similarity: cluster.min_similarity, tier: cluster.tier, functions }
         })
         .collect();
 
@@ -487,6 +504,7 @@ fn json_containments(report: &CloneReport, config: &OutputConfig) -> Vec<JsonCon
             end_line: c.end_line + 1,
             statement_count: c.statement_count,
             score: c.score,
+            tier: c.tier,
         })
         .collect()
 }
@@ -509,7 +527,8 @@ fn sarif_containment_results(report: &CloneReport) -> Vec<serde_json::Value> {
                 "message": {
                     "text": format!(
                         "{}:{}-{} (the {} run of `{}`) is already implemented by `{}` at {}:{} \
-                         (containment: {:.2}, {} statements) — call `{}` instead of repeating it.",
+                         (tier: {}, containment: {:.2}, {} statements) — call `{}` instead of \
+                         repeating it.",
                         outer.file_path.display(),
                         c.start_line + 1,
                         c.end_line + 1,
@@ -518,11 +537,13 @@ fn sarif_containment_results(report: &CloneReport) -> Vec<serde_json::Value> {
                         inner.name,
                         inner.file_path.display(),
                         inner.start_line + 1,
+                        c.tier.as_str(),
                         c.score,
                         c.statement_count,
                         inner.name,
                     )
                 },
+                "properties": { "tier": c.tier.as_str() },
                 "locations": [sarif_location(
                     &outer.file_path.display().to_string(),
                     c.start_line + 1,
@@ -577,8 +598,9 @@ pub fn format_sarif(report: &CloneReport, _config: &OutputConfig) -> anyhow::Res
             cluster.members.iter().map(|&idx| report.functions[idx].name.clone()).collect();
 
         let mut message = format!(
-            "Clone cluster #{} (similarity: {:.2}): {}",
+            "Clone cluster #{} (tier: {}, similarity: {:.2}): {}",
             i + 1,
+            cluster.tier.as_str(),
             cluster.min_similarity,
             member_names.join(", ")
         );
@@ -603,6 +625,7 @@ pub fn format_sarif(report: &CloneReport, _config: &OutputConfig) -> anyhow::Res
             "message": {
                 "text": message
             },
+            "properties": { "tier": cluster.tier.as_str() },
             "locations": [locations.first()],
             "relatedLocations": locations.iter().skip(1).collect::<Vec<_>>()
         })
@@ -646,32 +669,16 @@ pub fn format_sarif(report: &CloneReport, _config: &OutputConfig) -> anyhow::Res
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-
-    fn make_func(name: &str, file: &str, start: usize, end: usize) -> FunctionFragment {
-        FunctionFragment {
-            name: name.to_owned(),
-            file_path: PathBuf::from(file),
-            start_line: start,
-            end_line: end,
-            byte_range: 0..100,
-            source_text: format!("def {name}():\n    pass\n"),
-        }
-    }
-
-    fn make_pair(left: usize, right: usize, similarity: f64) -> SimilarPair {
-        SimilarPair { left, right, similarity }
-    }
+    use crate::testing::{fragment, pair};
 
     /// A report with one containment finding and no symmetric pairs.
     fn containment_report() -> CloneReport {
         CloneReport {
             files_scanned: 2,
             functions: vec![
-                make_func("normalize_records", "a.py", 11, 26),
-                make_func("load_then_normalize", "b.py", 39, 57),
+                fragment("normalize_records", "a.py", 11, 26),
+                fragment("load_then_normalize", "b.py", 39, 57),
             ],
             normalized: vec![],
             pairs: vec![],
@@ -683,6 +690,7 @@ mod tests {
                 end_line: 57,
                 statement_count: 4,
                 score: 0.94,
+                tier: Tier::Similar,
             }],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -718,7 +726,7 @@ mod tests {
     fn json_carries_the_schema_version() {
         let json = format_json(&containment_report(), &OutputConfig::default()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["schema_version"], 2);
+        assert_eq!(parsed["schema_version"], 3);
     }
 
     #[test]
@@ -738,13 +746,13 @@ mod tests {
     fn json_omits_containments_when_there_are_none() {
         let report = CloneReport {
             containments: vec![],
-            pairs: vec![make_pair(0, 1, 0.9)],
+            pairs: vec![pair(0, 1, 0.9)],
             ..containment_report()
         };
         let json = format_json(&report, &OutputConfig::default()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.get("containments").is_none(), "got: {json}");
-        assert_eq!(parsed["schema_version"], 2, "version is emitted regardless");
+        assert_eq!(parsed["schema_version"], 3, "version is emitted regardless");
     }
 
     #[test]
@@ -771,7 +779,7 @@ mod tests {
 
     #[test]
     fn transitive_closure() {
-        let pairs = vec![make_pair(0, 1, 0.9), make_pair(1, 2, 0.8)];
+        let pairs = vec![pair(0, 1, 0.9), pair(1, 2, 0.8)];
         let clusters = cluster_pairs(&pairs, 3);
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].members.len(), 3);
@@ -779,14 +787,14 @@ mod tests {
 
     #[test]
     fn independent_clusters() {
-        let pairs = vec![make_pair(0, 1, 0.9), make_pair(2, 3, 0.8)];
+        let pairs = vec![pair(0, 1, 0.9), pair(2, 3, 0.8)];
         let clusters = cluster_pairs(&pairs, 4);
         assert_eq!(clusters.len(), 2);
     }
 
     #[test]
     fn single_pair_cluster() {
-        let pairs = vec![make_pair(0, 1, 0.85)];
+        let pairs = vec![pair(0, 1, 0.85)];
         let clusters = cluster_pairs(&pairs, 2);
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].members.len(), 2);
@@ -805,12 +813,9 @@ mod tests {
     fn text_format_single_cluster() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -827,12 +832,9 @@ mod tests {
     fn text_format_with_clones_mentions_suppression() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -884,13 +886,13 @@ mod tests {
         let report = CloneReport {
             files_scanned: 4,
             functions: vec![
-                make_func("a", "a.py", 0, 10),
-                make_func("b", "b.py", 0, 10),
-                make_func("c", "c.py", 0, 10),
-                make_func("d", "d.py", 0, 10),
+                fragment("a", "a.py", 0, 10),
+                fragment("b", "b.py", 0, 10),
+                fragment("c", "c.py", 0, 10),
+                fragment("d", "d.py", 0, 10),
             ],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.9), make_pair(2, 3, 0.8)],
+            pairs: vec![pair(0, 1, 0.9), pair(2, 3, 0.8)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -907,12 +909,9 @@ mod tests {
     fn text_format_color_header_contains_ansi() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -928,12 +927,9 @@ mod tests {
     fn text_format_color_function_names_highlighted() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -950,12 +946,9 @@ mod tests {
     fn text_format_no_color_no_ansi() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -971,12 +964,9 @@ mod tests {
     fn json_format_valid_json() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -991,12 +981,9 @@ mod tests {
     fn json_format_contains_expected_fields() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -1018,12 +1005,9 @@ mod tests {
     fn sarif_format_valid_json() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -1037,12 +1021,9 @@ mod tests {
     fn sarif_format_has_required_fields() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),

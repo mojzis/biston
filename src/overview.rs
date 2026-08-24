@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::config::OutputConfig;
 use crate::report::CloneReport;
 use crate::similarity::SimilarPair;
+use crate::tier::Tier;
 
 const BOLD: &str = "\x1b[1m";
 const RED: &str = "\x1b[31m";
@@ -18,6 +19,13 @@ const RESET: &str = "\x1b[0m";
 /// Annotation describing the best clone partner for a function.
 pub struct CloneAnnotation {
     pub similarity: f64,
+    /// The acceptance tier that admitted the pair.
+    ///
+    /// Carried rather than re-derived from `similarity`: the two are different
+    /// claims. A pair can score 1.0 and still be a `similar`-tier finding, when it
+    /// cleared the fuzzy rule rather than the exact one, and this view must not say
+    /// "exact" where every other output format says otherwise.
+    pub tier: Tier,
     pub partner_name: String,
     pub partner_file: String,
 }
@@ -59,12 +67,15 @@ impl FileOverview {
     }
 }
 
+/// One clone partner: the other function's index, the pair's score and its tier.
+type Partner = (usize, f64, Tier);
+
 /// Build a bidirectional map from function index to clone partners.
-fn build_clone_map(pairs: &[SimilarPair]) -> FxHashMap<usize, Vec<(usize, f64)>> {
-    let mut clone_map: FxHashMap<usize, Vec<(usize, f64)>> = FxHashMap::default();
+fn build_clone_map(pairs: &[SimilarPair]) -> FxHashMap<usize, Vec<Partner>> {
+    let mut clone_map: FxHashMap<usize, Vec<Partner>> = FxHashMap::default();
     for pair in pairs {
-        clone_map.entry(pair.left).or_default().push((pair.right, pair.similarity));
-        clone_map.entry(pair.right).or_default().push((pair.left, pair.similarity));
+        clone_map.entry(pair.left).or_default().push((pair.right, pair.similarity, pair.tier));
+        clone_map.entry(pair.right).or_default().push((pair.left, pair.similarity, pair.tier));
     }
     clone_map
 }
@@ -111,8 +122,9 @@ pub fn compute_overview(report: &CloneReport) -> Vec<FileOverview> {
                             .max_by(|a, b| {
                                 a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
                             })
-                            .map(|&(partner_idx, similarity)| CloneAnnotation {
+                            .map(|&(partner_idx, similarity, tier)| CloneAnnotation {
                                 similarity,
+                                tier,
                                 partner_name: report.functions[partner_idx].name.clone(),
                                 partner_file: report.functions[partner_idx]
                                     .file_path
@@ -194,8 +206,7 @@ pub fn format_overview_text(
             let end = func.end_line + 1;
 
             if let Some(ref ann) = entry.best_clone {
-                let is_exact = (ann.similarity - 1.0).abs() < f64::EPSILON;
-                let bullet_color = if is_exact { red } else { yellow };
+                let bullet_color = if ann.tier == Tier::Exact { red } else { yellow };
                 let _ = writeln!(
                     out,
                     "  {bullet_color}\u{25cf}{reset} {:<18} {}-{}   \u{2248}{:.2} \u{2194} {}",
@@ -273,6 +284,8 @@ struct JsonClonePartner {
     name: String,
     file: String,
     similarity: f64,
+    /// Which acceptance tier admitted this pair: `exact` or `similar`.
+    tier: Tier,
 }
 
 /// Format the overview as JSON. Includes all clone partners per function (not just best).
@@ -304,13 +317,14 @@ pub fn format_overview_json(
                             .map(|partners| {
                                 partners
                                     .iter()
-                                    .map(|&(partner_idx, similarity)| JsonClonePartner {
+                                    .map(|&(partner_idx, similarity, tier)| JsonClonePartner {
                                         name: report.functions[partner_idx].name.clone(),
                                         file: report.functions[partner_idx]
                                             .file_path
                                             .display()
                                             .to_string(),
                                         similarity,
+                                        tier,
                                     })
                                     .collect()
                             })
@@ -346,21 +360,7 @@ mod tests {
     use crate::extract::FunctionFragment;
     use crate::similarity::SimilarPair;
     use crate::suppress::SuppressionStats;
-
-    fn make_func(name: &str, file: &str, start: usize, end: usize) -> FunctionFragment {
-        FunctionFragment {
-            name: name.to_owned(),
-            file_path: PathBuf::from(file),
-            start_line: start,
-            end_line: end,
-            byte_range: 0..100,
-            source_text: format!("def {name}():\n    pass\n"),
-        }
-    }
-
-    fn make_pair(left: usize, right: usize, similarity: f64) -> SimilarPair {
-        SimilarPair { left, right, similarity }
-    }
+    use crate::testing::{fragment, pair};
 
     fn make_report(functions: Vec<FunctionFragment>, pairs: Vec<SimilarPair>) -> CloneReport {
         CloneReport {
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn functions_without_clones_have_no_annotation() {
         let report = make_report(
-            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
+            vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
             vec![],
         );
         let overviews = compute_overview(&report);
@@ -400,8 +400,8 @@ mod tests {
     #[test]
     fn clone_pair_annotates_both_functions() {
         let report = make_report(
-            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
-            vec![make_pair(0, 1, 0.95)],
+            vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
+            vec![pair(0, 1, 0.95)],
         );
         let overviews = compute_overview(&report);
         // Both files should have clone_count 1
@@ -417,11 +417,11 @@ mod tests {
     fn best_clone_picks_highest_similarity() {
         let report = make_report(
             vec![
-                make_func("a", "x.py", 0, 10),
-                make_func("b", "y.py", 0, 10),
-                make_func("c", "z.py", 0, 10),
+                fragment("a", "x.py", 0, 10),
+                fragment("b", "y.py", 0, 10),
+                fragment("c", "z.py", 0, 10),
             ],
-            vec![make_pair(0, 1, 0.80), make_pair(0, 2, 0.95)],
+            vec![pair(0, 1, 0.80), pair(0, 2, 0.95)],
         );
         let overviews = compute_overview(&report);
         let x_file = overviews.iter().find(|f| f.file_path == Path::new("x.py")).unwrap();
@@ -434,12 +434,12 @@ mod tests {
     fn files_sorted_by_clone_count_desc_then_path() {
         let report = make_report(
             vec![
-                make_func("a", "b.py", 0, 10),
-                make_func("b", "a.py", 0, 10),
-                make_func("c", "c.py", 0, 10),
-                make_func("d", "c.py", 10, 20),
+                fragment("a", "b.py", 0, 10),
+                fragment("b", "a.py", 0, 10),
+                fragment("c", "c.py", 0, 10),
+                fragment("d", "c.py", 10, 20),
             ],
-            vec![make_pair(2, 3, 0.90), make_pair(0, 1, 0.85)],
+            vec![pair(2, 3, 0.90), pair(0, 1, 0.85)],
         );
         let overviews = compute_overview(&report);
         // c.py has 2 clones, a.py and b.py have 1 each
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn functions_sorted_by_start_line_within_file() {
         let report = make_report(
-            vec![make_func("second", "a.py", 20, 30), make_func("first", "a.py", 0, 10)],
+            vec![fragment("second", "a.py", 20, 30), fragment("first", "a.py", 0, 10)],
             vec![],
         );
         let overviews = compute_overview(&report);
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn text_format_header_line() {
-        let report = make_report(vec![make_func("foo", "a.py", 0, 10)], vec![]);
+        let report = make_report(vec![fragment("foo", "a.py", 0, 10)], vec![]);
         let overviews = compute_overview(&report);
         let config = OutputConfig { color: false, ..OutputConfig::default() };
         let text = format_overview_text(&overviews, &report, &config);
@@ -475,8 +475,8 @@ mod tests {
     #[test]
     fn text_format_shows_clone_bullet() {
         let report = make_report(
-            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
-            vec![make_pair(0, 1, 0.95)],
+            vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
+            vec![pair(0, 1, 0.95)],
         );
         let overviews = compute_overview(&report);
         let config = OutputConfig { color: false, ..OutputConfig::default() };
@@ -493,11 +493,11 @@ mod tests {
     fn text_format_clean_file_footer() {
         let report = make_report(
             vec![
-                make_func("foo", "a.py", 0, 10),
-                make_func("bar", "b.py", 0, 10),
-                make_func("baz", "c.py", 0, 10),
+                fragment("foo", "a.py", 0, 10),
+                fragment("bar", "b.py", 0, 10),
+                fragment("baz", "c.py", 0, 10),
             ],
-            vec![make_pair(0, 1, 0.90)],
+            vec![pair(0, 1, 0.90)],
         );
         let overviews = compute_overview(&report);
         let config = OutputConfig { color: false, ..OutputConfig::default() };
@@ -508,8 +508,8 @@ mod tests {
     #[test]
     fn text_format_no_ansi_without_color() {
         let report = make_report(
-            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
-            vec![make_pair(0, 1, 1.0)],
+            vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
+            vec![pair(0, 1, 1.0)],
         );
         let overviews = compute_overview(&report);
         let config = OutputConfig { color: false, ..OutputConfig::default() };
@@ -520,8 +520,8 @@ mod tests {
     #[test]
     fn text_format_has_ansi_with_color() {
         let report = make_report(
-            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
-            vec![make_pair(0, 1, 1.0)],
+            vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
+            vec![pair(0, 1, 1.0)],
         );
         let overviews = compute_overview(&report);
         let config = OutputConfig { color: true, ..OutputConfig::default() };
@@ -535,11 +535,11 @@ mod tests {
         // exact clones (1.0) should use RED and non-exact should use YELLOW
         let report = make_report(
             vec![
-                make_func("a", "x.py", 0, 10),
-                make_func("b", "y.py", 0, 10),
-                make_func("c", "z.py", 0, 10),
+                fragment("a", "x.py", 0, 10),
+                fragment("b", "y.py", 0, 10),
+                fragment("c", "z.py", 0, 10),
             ],
-            vec![make_pair(0, 1, 1.0), make_pair(0, 2, 0.85)],
+            vec![pair(0, 1, 1.0), pair(0, 2, 0.85)],
         );
         let overviews = compute_overview(&report);
         let config = OutputConfig { color: true, ..OutputConfig::default() };
@@ -551,8 +551,8 @@ mod tests {
     #[test]
     fn text_format_with_clones_mentions_suppression() {
         let report = make_report(
-            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
-            vec![make_pair(0, 1, 0.95)],
+            vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
+            vec![pair(0, 1, 0.95)],
         );
         let overviews = compute_overview(&report);
         let config = OutputConfig { color: false, ..OutputConfig::default() };
@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn text_format_no_clones_omits_suppression_hint() {
         let report = make_report(
-            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
+            vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
             vec![],
         );
         let overviews = compute_overview(&report);
@@ -576,8 +576,8 @@ mod tests {
     #[test]
     fn json_format_valid() {
         let report = make_report(
-            vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
-            vec![make_pair(0, 1, 0.95)],
+            vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
+            vec![pair(0, 1, 0.95)],
         );
         let overviews = compute_overview(&report);
         let json = format_overview_json(&overviews, &report).expect("should serialize");
@@ -592,11 +592,11 @@ mod tests {
     fn json_includes_all_partners() {
         let report = make_report(
             vec![
-                make_func("a", "x.py", 0, 10),
-                make_func("b", "y.py", 0, 10),
-                make_func("c", "z.py", 0, 10),
+                fragment("a", "x.py", 0, 10),
+                fragment("b", "y.py", 0, 10),
+                fragment("c", "z.py", 0, 10),
             ],
-            vec![make_pair(0, 1, 0.90), make_pair(0, 2, 0.80)],
+            vec![pair(0, 1, 0.90), pair(0, 2, 0.80)],
         );
         let overviews = compute_overview(&report);
         let json = format_overview_json(&overviews, &report).expect("should serialize");
@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn json_line_numbers_are_1_indexed() {
-        let report = make_report(vec![make_func("foo", "a.py", 0, 10)], vec![]);
+        let report = make_report(vec![fragment("foo", "a.py", 0, 10)], vec![]);
         let overviews = compute_overview(&report);
         let json = format_overview_json(&overviews, &report).expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");

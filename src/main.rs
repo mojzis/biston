@@ -83,9 +83,29 @@ struct CommonOpts {
     #[arg(long, value_enum)]
     format: Option<OutputFormat>,
 
-    /// Minimum function length in lines
+    /// Minimum function length in executable lines (alias: sets both tier floors)
     #[arg(long)]
     min_lines: Option<usize>,
+
+    /// Executable lines the shorter function needs for an exact match [default: 5]
+    #[arg(long)]
+    exact_min_lines: Option<usize>,
+
+    /// Executable lines the shorter function needs for a fuzzy match [default: 9]
+    #[arg(long)]
+    similar_min_lines: Option<usize>,
+
+    /// Statements a body needs for an exact match to be reported [default: 3]
+    #[arg(long)]
+    exact_min_stmts: Option<usize>,
+
+    /// Executable lines an exactly-matched contained run needs [default: 10]
+    #[arg(long)]
+    exact_min_fragment_lines: Option<usize>,
+
+    /// Executable lines a fuzzily-matched contained run needs [default: 15]
+    #[arg(long)]
+    similar_min_fragment_lines: Option<usize>,
 
     /// Similarity threshold (0.0 - 1.0)
     #[arg(long)]
@@ -166,8 +186,23 @@ impl CommonOpts {
         if let Some(fmt) = self.format {
             config.output.format = fmt;
         }
-        if let Some(ml) = self.min_lines {
-            config.scan.min_lines = ml;
+        if let Some(min_lines) = self.min_lines {
+            config.scan.min_lines = Some(min_lines);
+        }
+        if let Some(exact) = self.exact_min_lines {
+            config.scan.exact_min_lines = Some(exact);
+        }
+        if let Some(similar) = self.similar_min_lines {
+            config.scan.similar_min_lines = Some(similar);
+        }
+        if let Some(stmts) = self.exact_min_stmts {
+            config.scan.exact_min_stmts = stmts;
+        }
+        if let Some(exact) = self.exact_min_fragment_lines {
+            config.containment.exact_min_fragment_lines = Some(exact);
+        }
+        if let Some(similar) = self.similar_min_fragment_lines {
+            config.containment.similar_min_fragment_lines = Some(similar);
         }
         if let Some(th) = self.threshold {
             config.scan.threshold = th;
@@ -179,6 +214,11 @@ impl CommonOpts {
         if self.containment {
             config.containment.enabled = true;
         }
+
+        // Checked once, here: this is the first point where file and CLI settings
+        // have been merged, so it is the first point where a conflict between them
+        // is real rather than provisional.
+        config.check()?;
 
         Ok((config, scan_path))
     }
@@ -266,7 +306,11 @@ fn read_file_list(source: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Diagnostics go to stderr, where the default subscriber does not put them. The
+    // report is stdout, and a warning printed into it — an ignored config alias, an
+    // unparseable file — makes `--format json` unparseable for whatever consumes it.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
             |_| tracing_subscriber::EnvFilter::new(verbosity_filter(cli.verbose, cli.quiet)),
         ))

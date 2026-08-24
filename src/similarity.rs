@@ -1,6 +1,9 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::config::ScanConfig;
 use crate::hash::HashedFunction;
+use crate::measure::FragmentSize;
+use crate::tier::{accept_pair, Tier};
 
 /// Number of minhash permutations.
 const NUM_PERMUTATIONS: usize = 128;
@@ -14,15 +17,27 @@ pub struct SimilarPair {
     pub right: usize,
     /// Similarity score (1.0 for exact matches).
     pub similarity: f64,
+    /// The acceptance tier that admitted this pair.
+    pub tier: Tier,
 }
 
-/// Find all similar function pairs above the given threshold.
+/// Find every function pair an acceptance tier admits.
 ///
 /// Combines exact matching (root hash) and near-miss detection (minhash + LSH).
-pub fn find_similar_functions(functions: &[HashedFunction], threshold: f64) -> Vec<SimilarPair> {
+/// Both phases produce *candidates*; [`crate::tier::accept_pair`] decides which of
+/// them are worth reporting, reading `sizes[fragment_index]` for the size gates.
+pub fn find_similar_functions(
+    functions: &[HashedFunction],
+    sizes: &[FragmentSize],
+    config: &ScanConfig,
+) -> Vec<SimilarPair> {
     if functions.is_empty() {
         return vec![];
     }
+    debug_assert!(
+        functions.iter().all(|f| f.fragment_index < sizes.len()),
+        "every hashed function must have a measured fragment to gate on"
+    );
 
     // Two independent degeneracy filters, applied before *either* phase.
     //
@@ -43,16 +58,19 @@ pub fn find_similar_functions(functions: &[HashedFunction], threshold: f64) -> V
         return vec![];
     }
 
-    // Phase 1: exact matches
+    // Phase 1: exact matches. Every root-hash group is a candidate; the tier gates
+    // then keep the ones carrying enough code to be worth reporting.
     let mut exact_pairs: FxHashSet<(usize, usize)> = FxHashSet::default();
-    let mut pairs = find_exact_matches(&reportable);
-    for p in &pairs {
-        let key = if p.left < p.right { (p.left, p.right) } else { (p.right, p.left) };
-        exact_pairs.insert(key);
+    let mut pairs = Vec::new();
+    for (left, right) in find_exact_matches(&reportable) {
+        exact_pairs.insert((left, right));
+        if let Some(tier) = accept_pair(1.0, true, sizes[left], sizes[right], config) {
+            pairs.push(SimilarPair { left, right, similarity: 1.0, tier });
+        }
     }
 
     // Phase 2: near-miss detection via minhash + LSH
-    let (bands, rows) = lsh_params_for_threshold(threshold);
+    let (bands, rows) = lsh_params_for_threshold(config.threshold);
     let mut lsh = LshIndex::new(bands, rows);
     for (i, func) in reportable.iter().enumerate() {
         lsh.insert(i, &minhash_signature(&func.subtree_hashes));
@@ -61,6 +79,7 @@ pub fn find_similar_functions(functions: &[HashedFunction], threshold: f64) -> V
     lsh.log_occupancy();
 
     let candidates = lsh.candidates();
+    tracing::debug!("similarity index: {} candidate pair(s) to score", candidates.len());
     for (i, j) in candidates {
         let fi = reportable[i].fragment_index;
         let fj = reportable[j].fragment_index;
@@ -70,12 +89,14 @@ pub fn find_similar_functions(functions: &[HashedFunction], threshold: f64) -> V
         }
 
         let sim = jaccard_similarity(&reportable[i].subtree_hashes, &reportable[j].subtree_hashes);
-        if sim >= threshold {
-            pairs.push(SimilarPair { left: key.0, right: key.1, similarity: sim });
+        // `false`: an equal root hash would have been found by phase 1, and a
+        // Jaccard of 1.0 over depth-truncated subtrees is not the same claim.
+        if let Some(tier) = accept_pair(sim, false, sizes[key.0], sizes[key.1], config) {
+            pairs.push(SimilarPair { left: key.0, right: key.1, similarity: sim, tier });
         }
     }
 
-    // Sort by similarity desc, then by left index asc for determinism
+    // Sort by similarity desc, then by index for determinism
     pairs.sort_by(|a, b| {
         b.similarity
             .partial_cmp(&a.similarity)
@@ -87,10 +108,15 @@ pub fn find_similar_functions(functions: &[HashedFunction], threshold: f64) -> V
     pairs
 }
 
-/// Find exact matches by grouping functions with identical root hashes.
+/// A candidate pair from the exact phase, as `(lower, higher)` fragment indices.
+pub(crate) type ExactCandidate = (usize, usize);
+
+/// Group functions by root hash and return every pair inside a group.
 ///
-/// Takes a slice of references so callers can pre-filter without cloning.
-pub(crate) fn find_exact_matches(functions: &[&HashedFunction]) -> Vec<SimilarPair> {
+/// These are candidates, not findings: whether an identical pair is *reportable*
+/// depends on how much code it covers, which this grouping primitive knows nothing
+/// about. Takes a slice of references so callers can pre-filter without cloning.
+pub(crate) fn find_exact_matches(functions: &[&HashedFunction]) -> Vec<ExactCandidate> {
     let mut groups: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
 
     for func in functions {
@@ -104,11 +130,13 @@ pub(crate) fn find_exact_matches(functions: &[&HashedFunction]) -> Vec<SimilarPa
         }
         for i in 0..indices.len() {
             for j in (i + 1)..indices.len() {
-                pairs.push(SimilarPair { left: indices[i], right: indices[j], similarity: 1.0 });
+                let (left, right) = (indices[i].min(indices[j]), indices[i].max(indices[j]));
+                pairs.push((left, right));
             }
         }
     }
-
+    // Group iteration order follows a hash map, so sort for a deterministic result.
+    pairs.sort_unstable();
     pairs
 }
 
@@ -260,6 +288,25 @@ pub(crate) fn lsh_params_for_threshold(threshold: f64) -> (usize, usize) {
 mod tests {
     use super::*;
 
+    /// Sizes for `count` functions, all comfortably above every tier floor.
+    ///
+    /// The tier gates have their own tests; these cases are about which candidates
+    /// the two phases produce, so nothing here should be filtered on size.
+    fn ample_sizes(count: usize) -> Vec<FragmentSize> {
+        vec![FragmentSize { executable_lines: 40, executable_stmts: 20 }; count]
+    }
+
+    /// A config with the given similarity threshold and the default tier floors.
+    fn config_at(threshold: f64) -> ScanConfig {
+        ScanConfig { threshold, ..ScanConfig::default() }
+    }
+
+    /// Run the pipeline over functions that are all big enough to report.
+    fn find_pairs(functions: &[HashedFunction], threshold: f64) -> Vec<SimilarPair> {
+        let sizes = ample_sizes(functions.len().max(1));
+        find_similar_functions(functions, &sizes, &config_at(threshold))
+    }
+
     fn make_hashed(index: usize, root_hash: u64) -> HashedFunction {
         HashedFunction {
             fragment_index: index,
@@ -293,10 +340,7 @@ mod tests {
         let funcs = [make_hashed(0, 100), make_hashed(1, 100)];
         let refs: Vec<&HashedFunction> = funcs.iter().collect();
         let pairs = find_exact_matches(&refs);
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].left, 0);
-        assert_eq!(pairs[0].right, 1);
-        assert!((pairs[0].similarity - 1.0).abs() < f64::EPSILON);
+        assert_eq!(pairs, vec![(0, 1)]);
     }
 
     #[test]
@@ -466,7 +510,7 @@ mod tests {
         // Distinct root hashes, both fingerprints empty: nothing to compare.
         let funcs =
             vec![make_hashed_with_subtrees(0, 1, &[]), make_hashed_with_subtrees(1, 2, &[])];
-        let pairs = find_similar_functions(&funcs, 0.7);
+        let pairs = find_pairs(&funcs, 0.7);
         assert!(pairs.is_empty(), "empty fingerprints must not pair: {pairs:?}");
     }
 
@@ -476,7 +520,7 @@ mod tests {
         // such signature, so N degenerate functions would yield N*(N-1)/2 pairs.
         let funcs: Vec<_> =
             (0..30).map(|i| make_hashed_with_subtrees(i, i as u64 + 1, &[])).collect();
-        let pairs = find_similar_functions(&funcs, 0.7);
+        let pairs = find_pairs(&funcs, 0.7);
         assert!(pairs.is_empty(), "expected 0 pairs, got {}", pairs.len());
     }
 
@@ -486,7 +530,7 @@ mod tests {
         // filtered too, not only the LSH phase.
         let funcs =
             vec![make_hashed_with_subtrees(0, 100, &[]), make_hashed_with_subtrees(1, 100, &[])];
-        let pairs = find_similar_functions(&funcs, 0.7);
+        let pairs = find_pairs(&funcs, 0.7);
         assert!(pairs.is_empty(), "expected 0 pairs, got {pairs:?}");
     }
 
@@ -496,7 +540,7 @@ mod tests {
         // non-empty (one hash of the function outline) and the root hashes are equal,
         // so both the exact and the near-miss phase would happily pair them.
         let funcs = vec![make_inert(0, 100, &[7]), make_inert(1, 100, &[7])];
-        let pairs = find_similar_functions(&funcs, 0.7);
+        let pairs = find_pairs(&funcs, 0.7);
         assert!(pairs.is_empty(), "expected 0 pairs, got {pairs:?}");
     }
 
@@ -508,7 +552,7 @@ mod tests {
             make_hashed_with_subtrees(1, 100, &subtrees),
             make_hashed_with_subtrees(2, 100, &subtrees),
         ];
-        let pairs = find_similar_functions(&funcs, 0.7);
+        let pairs = find_pairs(&funcs, 0.7);
         assert_eq!(pairs.len(), 1, "only the two executable functions may pair: {pairs:?}");
         assert_eq!((pairs[0].left, pairs[0].right), (1, 2));
     }
@@ -528,7 +572,7 @@ mod tests {
             make_hashed_with_subtrees(0, 1, &[]),
             make_hashed_with_subtrees(1, 2, &(0..100).collect::<Vec<_>>()),
         ];
-        let pairs = find_similar_functions(&funcs, 0.7);
+        let pairs = find_pairs(&funcs, 0.7);
         assert!(pairs.is_empty(), "expected 0 pairs, got {pairs:?}");
     }
 
@@ -543,7 +587,7 @@ mod tests {
             make_hashed_with_subtrees(0, 100, &subtrees),
             make_hashed_with_subtrees(1, 100, &subtrees),
         ];
-        let pairs = find_similar_functions(&funcs, 0.7);
+        let pairs = find_pairs(&funcs, 0.7);
         assert_eq!(pairs.len(), 1);
         assert!((pairs[0].similarity - 1.0).abs() < f64::EPSILON);
     }
@@ -563,7 +607,7 @@ mod tests {
             make_hashed_with_subtrees(1, 2, &subtrees_b),
         ];
 
-        let pairs = find_similar_functions(&funcs, 0.5);
+        let pairs = find_pairs(&funcs, 0.5);
         assert!(!pairs.is_empty(), "expected near-miss to be detected");
         assert!(pairs[0].similarity > 0.5);
     }
@@ -576,13 +620,13 @@ mod tests {
             make_hashed_with_subtrees(1, 2, &(1000..1100).collect::<Vec<_>>()),
         ];
 
-        let pairs = find_similar_functions(&funcs, 0.7);
+        let pairs = find_pairs(&funcs, 0.7);
         assert!(pairs.is_empty());
     }
 
     #[test]
     fn full_pipeline_empty_input() {
-        let pairs = find_similar_functions(&[], 0.7);
+        let pairs = find_pairs(&[], 0.7);
         assert!(pairs.is_empty());
     }
 
@@ -595,7 +639,7 @@ mod tests {
             make_hashed_with_subtrees(3, 2, &(0..80).chain(300..320).collect::<Vec<_>>()),
         ];
 
-        let pairs = find_similar_functions(&funcs, 0.5);
+        let pairs = find_pairs(&funcs, 0.5);
         // Check that pairs are sorted by similarity descending
         for window in pairs.windows(2) {
             assert!(window[0].similarity >= window[1].similarity);
