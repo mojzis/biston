@@ -24,12 +24,33 @@ pub struct Config {
 pub struct ContainmentConfig {
     /// Whether containment detection runs.
     pub enabled: bool,
-    /// Minimum line span of the matched run.
+    /// Retained alias for both fragment floors below.
     ///
-    /// Deliberately higher than `scan.min_lines`: a short shared run is stock
-    /// boilerplate (`with open(...)`, read, `json.loads`), and "extract this" is not
-    /// useful advice about boilerplate.
-    pub min_fragment_lines: usize,
+    /// Set on its own it still means what it always meant — one floor for every
+    /// accepted run. It is only an alias now because the floor a run must clear
+    /// depends on how strong the match is; see [`Self::exact_min_fragment_lines`].
+    pub min_fragment_lines: Option<usize>,
+    /// Executable lines a run must span to be reported on the strength of an
+    /// *exact* match.
+    ///
+    /// Lower than [`Self::similar_min_fragment_lines`] on purpose: an exact
+    /// fingerprint match is strong evidence, so less of it is needed. Still
+    /// deliberately higher than the whole-function floors — a fragment carries less
+    /// context than a function, and a short shared run is stock boilerplate
+    /// (`with open(...)`, read, `json.loads`) that "extract this" is no advice about.
+    ///
+    /// Defaults to `min_fragment_lines` when that is set, otherwise to
+    /// [`Self::DEFAULT_EXACT_MIN_FRAGMENT_LINES`].
+    pub exact_min_fragment_lines: Option<usize>,
+    /// Executable lines a run must span to be reported on the strength of a
+    /// *fuzzy* match.
+    ///
+    /// The containment coefficient over a handful of subtrees is a coarse, jumpy
+    /// statistic, so a fuzzy match has to bring more evidence with it.
+    ///
+    /// Defaults to `min_fragment_lines` when that is set, otherwise to
+    /// [`Self::DEFAULT_SIMILAR_MIN_FRAGMENT_LINES`].
+    pub similar_min_fragment_lines: Option<usize>,
     /// The contained function must be at least this fraction of the container.
     ///
     /// Below it, what was found is a detail of a much larger function rather than an
@@ -60,7 +81,9 @@ impl Default for ContainmentConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            min_fragment_lines: 15,
+            min_fragment_lines: None,
+            exact_min_fragment_lines: None,
+            similar_min_fragment_lines: None,
             min_ratio: 0.30,
             threshold: 0.85,
             size_balance: 1.25,
@@ -71,6 +94,36 @@ impl Default for ContainmentConfig {
 }
 
 impl ContainmentConfig {
+    /// Fragment floor for the exact tier when nothing is configured.
+    pub const DEFAULT_EXACT_MIN_FRAGMENT_LINES: usize = 10;
+    /// Fragment floor for the similar tier when nothing is configured.
+    pub const DEFAULT_SIMILAR_MIN_FRAGMENT_LINES: usize = 15;
+
+    /// Executable lines an exactly-matched run must span.
+    #[must_use]
+    pub fn exact_fragment_floor(&self) -> usize {
+        self.exact_min_fragment_lines
+            .or(self.min_fragment_lines)
+            .unwrap_or(Self::DEFAULT_EXACT_MIN_FRAGMENT_LINES)
+    }
+
+    /// Executable lines a fuzzily-matched run must span.
+    #[must_use]
+    pub fn similar_fragment_floor(&self) -> usize {
+        self.similar_min_fragment_lines
+            .or(self.min_fragment_lines)
+            .unwrap_or(Self::DEFAULT_SIMILAR_MIN_FRAGMENT_LINES)
+    }
+
+    /// Shortest run either tier could accept.
+    ///
+    /// Runs below it are never evaluated, which is what keeps the tier gates from
+    /// being a second filter in front of an older, stricter one.
+    #[must_use]
+    pub fn candidate_fragment_floor(&self) -> usize {
+        self.exact_fragment_floor().min(self.similar_fragment_floor())
+    }
+
     /// The minimum tolerated `min(|A|,|F|) / max(|A|,|F|)`.
     ///
     /// Returns 0.0 for a non-positive `size_balance`, which disables the guard rather
@@ -113,7 +166,39 @@ impl Default for SuggestConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ScanConfig {
-    pub min_lines: usize,
+    /// Retained alias for both line floors below.
+    ///
+    /// Supported indefinitely: a config that sets only `min_lines` keeps meaning
+    /// what it always meant — one floor, applied to every reported pair. It became
+    /// an alias because a single floor cannot say what the tiers say, namely that a
+    /// short *exact* duplicate is worth reporting and a short *fuzzy* one is not.
+    pub min_lines: Option<usize>,
+    /// Executable lines the shorter function must have for an *exact* match to be
+    /// reported.
+    ///
+    /// An exact match of the normalized tree is strong evidence on its own, so this
+    /// floor is low. It is not the only exact-tier guard: see [`Self::exact_min_stmts`].
+    ///
+    /// Defaults to `min_lines` when that is set, otherwise to
+    /// [`Self::DEFAULT_EXACT_MIN_LINES`].
+    pub exact_min_lines: Option<usize>,
+    /// Executable lines the shorter function must have for a *fuzzy* match to be
+    /// reported.
+    ///
+    /// Jaccard over a handful of subtrees is a coarse statistic that jumps on small
+    /// edits, so a fuzzy match needs a bigger evidence base than an exact one.
+    ///
+    /// Defaults to `min_lines` when that is set, otherwise to
+    /// [`Self::DEFAULT_SIMILAR_MIN_LINES`].
+    pub similar_min_lines: Option<usize>,
+    /// Statements a body must have for an *exact* match to be reported.
+    ///
+    /// Applies to the exact tier only. After normalization — locals anonymized,
+    /// comments, docstrings and annotations gone — short bodies collide on idiom
+    /// rather than on content: delegation wrappers, guard-return pairs,
+    /// `try: ... except: pass`. They hash identical because the idiom is identical,
+    /// and there is nothing in them to extract.
+    pub exact_min_stmts: usize,
     pub threshold: f64,
     pub exclude: Vec<String>,
     pub include: Vec<String>,
@@ -154,8 +239,11 @@ pub struct OutputConfig {
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            min_lines: 10,
-            threshold: 0.7,
+            min_lines: None,
+            exact_min_lines: None,
+            similar_min_lines: None,
+            exact_min_stmts: 3,
+            threshold: 0.85,
             exclude: vec![
                 "tests/**".to_owned(),
                 "**/conftest.py".to_owned(),
@@ -167,6 +255,33 @@ impl Default for ScanConfig {
 }
 
 impl ScanConfig {
+    /// Line floor for the exact tier when nothing is configured.
+    pub const DEFAULT_EXACT_MIN_LINES: usize = 5;
+    /// Line floor for the similar tier when nothing is configured.
+    pub const DEFAULT_SIMILAR_MIN_LINES: usize = 9;
+
+    /// Executable lines the shorter function of an exact match must have.
+    #[must_use]
+    pub fn exact_line_floor(&self) -> usize {
+        self.exact_min_lines.or(self.min_lines).unwrap_or(Self::DEFAULT_EXACT_MIN_LINES)
+    }
+
+    /// Executable lines the shorter function of a fuzzy match must have.
+    #[must_use]
+    pub fn similar_line_floor(&self) -> usize {
+        self.similar_min_lines.or(self.min_lines).unwrap_or(Self::DEFAULT_SIMILAR_MIN_LINES)
+    }
+
+    /// Shortest function either tier could accept, and so the extraction floor.
+    ///
+    /// Extraction keeps everything a tier might later accept and nothing smaller.
+    /// Deciding reportability here instead would make the exact tier unable to see
+    /// the short functions it exists to report.
+    #[must_use]
+    pub fn extraction_line_floor(&self) -> usize {
+        self.exact_line_floor().min(self.similar_line_floor())
+    }
+
     /// Common glob patterns identifying Python test files.
     ///
     /// Matches pytest's default discovery conventions (`test_*.py`, `*_test.py`,
@@ -179,7 +294,7 @@ impl ScanConfig {
     ///
     /// Replaces `include` with [`Self::TEST_FILE_PATTERNS`] and clears `exclude`
     /// so that the default test-suppressing excludes no longer apply. Other
-    /// scan knobs (`min_lines`, `threshold`) are left untouched.
+    /// scan knobs (the size floors, `threshold`) are left untouched.
     pub fn scope_to_tests(&mut self) {
         self.include = Self::TEST_FILE_PATTERNS.iter().copied().map(String::from).collect();
         self.exclude = Vec::new();
@@ -226,7 +341,19 @@ impl Config {
     /// Load configuration from the given directory.
     ///
     /// Precedence: `biston.toml` > `pyproject.toml [tool.biston]` > defaults.
+    ///
+    /// Contradictory size floors are rejected here rather than silently reordered.
+    /// Alias warnings are not emitted here: the CLI merges its own overrides on top
+    /// of what was loaded, and a warning about the merged result is the only one
+    /// worth printing — see [`Self::check`].
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
+        let config = Self::read(dir)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Read configuration without validating it.
+    fn read(dir: &Path) -> anyhow::Result<Self> {
         let biston_toml = dir.join("biston.toml");
         if biston_toml.exists() {
             let contents =
@@ -249,6 +376,96 @@ impl Config {
 
         Ok(Self::default())
     }
+
+    /// Warn about shadowed aliases, then validate.
+    ///
+    /// Call this once, after every source of configuration has been merged — a
+    /// warning about a conflict the CLI then resolves would be noise.
+    pub fn check(&self) -> anyhow::Result<()> {
+        warn_if_alias_shadowed(
+            "scan",
+            "min_lines",
+            self.scan.min_lines,
+            &[
+                ("exact_min_lines", self.scan.exact_min_lines),
+                ("similar_min_lines", self.scan.similar_min_lines),
+            ],
+        );
+        warn_if_alias_shadowed(
+            "containment",
+            "min_fragment_lines",
+            self.containment.min_fragment_lines,
+            &[
+                ("exact_min_fragment_lines", self.containment.exact_min_fragment_lines),
+                ("similar_min_fragment_lines", self.containment.similar_min_fragment_lines),
+            ],
+        );
+        self.validate()
+    }
+
+    /// Reject configurations no scan could honour.
+    ///
+    /// These are errors rather than warnings on purpose: an exact floor above the
+    /// fuzzy one inverts the whole policy — the tier meant to catch *more* would
+    /// catch less — and silently reordering the two would hide the mistake behind
+    /// results that look plausible.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let scan = &self.scan;
+        anyhow::ensure!(
+            scan.exact_line_floor() <= scan.similar_line_floor(),
+            "scan.exact_min_lines ({}) must not exceed scan.similar_min_lines ({}):              an exact match is stronger evidence than a fuzzy one, so it cannot              require more of it",
+            scan.exact_line_floor(),
+            scan.similar_line_floor(),
+        );
+        anyhow::ensure!(
+            scan.exact_line_floor() >= 1,
+            "scan.exact_min_lines must be at least 1, got {}",
+            scan.exact_line_floor(),
+        );
+        anyhow::ensure!(
+            scan.exact_min_stmts >= 1,
+            "scan.exact_min_stmts must be at least 1, got {}",
+            scan.exact_min_stmts,
+        );
+
+        let containment = &self.containment;
+        anyhow::ensure!(
+            containment.exact_fragment_floor() <= containment.similar_fragment_floor(),
+            "containment.exact_min_fragment_lines ({}) must not exceed              containment.similar_min_fragment_lines ({})",
+            containment.exact_fragment_floor(),
+            containment.similar_fragment_floor(),
+        );
+        anyhow::ensure!(
+            containment.exact_fragment_floor() >= 1,
+            "containment.exact_min_fragment_lines must be at least 1, got {}",
+            containment.exact_fragment_floor(),
+        );
+        Ok(())
+    }
+}
+
+/// Warn once when a retained alias is set alongside the keys that supersede it.
+///
+/// The new keys win. The warning names the alias and every key overriding it, so
+/// the reader can delete one line and know exactly what changes.
+fn warn_if_alias_shadowed(
+    section: &str,
+    alias: &str,
+    alias_value: Option<usize>,
+    superseding: &[(&str, Option<usize>)],
+) {
+    if alias_value.is_none() {
+        return;
+    }
+    let set: Vec<&str> =
+        superseding.iter().filter(|(_, value)| value.is_some()).map(|&(key, _)| key).collect();
+    if set.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        "{section}.{alias} is ignored: {} also set and take(s) precedence",
+        set.iter().map(|key| format!("{section}.{key}")).collect::<Vec<_>>().join(" and "),
+    );
 }
 
 #[cfg(test)]
@@ -258,8 +475,11 @@ mod tests {
     #[test]
     fn default_config_has_expected_values() {
         let config = Config::default();
-        assert_eq!(config.scan.min_lines, 10);
-        assert!((config.scan.threshold - 0.7).abs() < f64::EPSILON);
+        assert_eq!(config.scan.min_lines, None, "the alias is unset until a user sets it");
+        assert_eq!(config.scan.exact_line_floor(), 5);
+        assert_eq!(config.scan.similar_line_floor(), 9);
+        assert_eq!(config.scan.exact_min_stmts, 3);
+        assert!((config.scan.threshold - 0.85).abs() < f64::EPSILON);
         assert_eq!(config.scan.include, vec!["**/*.py"]);
         assert!(config.normalization.anonymize_locals);
         assert!(!config.normalization.anonymize_literals);
@@ -274,15 +494,147 @@ mod tests {
     }
 
     #[test]
+    fn containment_defaults_split_the_fragment_floor_by_tier() {
+        let config = ContainmentConfig::default();
+        assert_eq!(config.min_fragment_lines, None);
+        assert_eq!(config.exact_fragment_floor(), 10);
+        assert_eq!(config.similar_fragment_floor(), 15);
+        assert_eq!(config.candidate_fragment_floor(), 10);
+    }
+
+    // --- Tier floors and the retained `min_lines` alias ---
+
+    #[test]
+    fn min_lines_alone_sets_both_line_floors() {
+        let config: Config = toml::from_str("[scan]\nmin_lines = 12\n").expect("should parse");
+        assert_eq!(config.scan.exact_line_floor(), 12);
+        assert_eq!(config.scan.similar_line_floor(), 12);
+        assert_eq!(config.scan.extraction_line_floor(), 12);
+    }
+
+    #[test]
+    fn tier_floors_win_over_min_lines() {
+        let toml_str = "[scan]\nmin_lines = 12\nexact_min_lines = 4\nsimilar_min_lines = 20\n";
+        let config: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(config.scan.exact_line_floor(), 4);
+        assert_eq!(config.scan.similar_line_floor(), 20);
+    }
+
+    #[test]
+    fn a_partially_set_tier_falls_back_to_min_lines_not_to_the_default() {
+        let config: Config =
+            toml::from_str("[scan]\nmin_lines = 12\nsimilar_min_lines = 20\n").expect("parse");
+        assert_eq!(config.scan.exact_line_floor(), 12, "the alias still speaks for the other tier");
+        assert_eq!(config.scan.similar_line_floor(), 20);
+    }
+
+    #[test]
+    fn extraction_floor_is_the_lower_of_the_two_tiers() {
+        let config: Config =
+            toml::from_str("[scan]\nexact_min_lines = 3\nsimilar_min_lines = 30\n").expect("parse");
+        assert_eq!(
+            config.scan.extraction_line_floor(),
+            3,
+            "extraction must keep everything a tier could accept"
+        );
+    }
+
+    #[test]
+    fn min_fragment_lines_alone_sets_both_fragment_floors() {
+        let config: Config =
+            toml::from_str("[containment]\nmin_fragment_lines = 20\n").expect("parse");
+        assert_eq!(config.containment.exact_fragment_floor(), 20);
+        assert_eq!(config.containment.similar_fragment_floor(), 20);
+    }
+
+    #[test]
+    fn fragment_tier_floors_win_over_min_fragment_lines() {
+        let toml_str = "[containment]\nmin_fragment_lines = 20\nexact_min_fragment_lines = 8\n";
+        let config: Config = toml::from_str(toml_str).expect("parse");
+        assert_eq!(config.containment.exact_fragment_floor(), 8);
+        assert_eq!(config.containment.similar_fragment_floor(), 20);
+    }
+
+    // --- Validation ---
+
+    #[test]
+    fn an_exact_floor_above_the_similar_floor_is_rejected() {
+        let config: Config =
+            toml::from_str("[scan]\nexact_min_lines = 12\nsimilar_min_lines = 9\n").expect("parse");
+        let err = config.validate().expect_err("inverted floors must not be accepted");
+        let message = err.to_string();
+        assert!(message.contains("exact_min_lines"), "got: {message}");
+        assert!(message.contains("similar_min_lines"), "got: {message}");
+    }
+
+    #[test]
+    fn an_exact_fragment_floor_above_the_similar_one_is_rejected() {
+        let toml_str =
+            "[containment]\nexact_min_fragment_lines = 20\nsimilar_min_fragment_lines = 15\n";
+        let config: Config = toml::from_str(toml_str).expect("parse");
+        let err = config.validate().expect_err("inverted fragment floors must not be accepted");
+        assert!(err.to_string().contains("exact_min_fragment_lines"), "got: {err}");
+    }
+
+    #[test]
+    fn a_zero_line_floor_is_rejected() {
+        let config: Config = toml::from_str("[scan]\nexact_min_lines = 0\n").expect("parse");
+        let err = config.validate().expect_err("a floor of zero admits everything");
+        assert!(err.to_string().contains("at least 1"), "got: {err}");
+    }
+
+    #[test]
+    fn a_zero_statement_floor_is_rejected() {
+        let config: Config = toml::from_str("[scan]\nexact_min_stmts = 0\n").expect("parse");
+        let err = config.validate().expect_err("a statement floor of zero admits every idiom");
+        assert!(err.to_string().contains("exact_min_stmts"), "got: {err}");
+    }
+
+    #[test]
+    fn a_zero_fragment_floor_is_rejected() {
+        let config: Config =
+            toml::from_str("[containment]\nmin_fragment_lines = 0\n").expect("parse");
+        let err = config.validate().expect_err("a fragment floor of zero admits everything");
+        assert!(err.to_string().contains("at least 1"), "got: {err}");
+    }
+
+    #[test]
+    fn equal_floors_are_accepted() {
+        let config: Config =
+            toml::from_str("[scan]\nexact_min_lines = 9\nsimilar_min_lines = 9\n").expect("parse");
+        config.validate().expect("one floor for both tiers is a legitimate policy");
+    }
+
+    #[test]
+    fn load_rejects_an_invalid_config_rather_than_scanning_with_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("biston.toml"),
+            "[scan]\nexact_min_lines = 20\nsimilar_min_lines = 5\n",
+        )
+        .expect("write");
+        let err = Config::load(dir.path()).expect_err("invalid config must not load");
+        assert!(err.to_string().contains("exact_min_lines"), "got: {err}");
+    }
+
+    #[test]
+    fn check_accepts_a_config_that_only_uses_the_alias() {
+        let config: Config = toml::from_str("[scan]\nmin_lines = 10\n").expect("parse");
+        config.check().expect("the alias on its own is not a conflict");
+    }
+
+    // --- Parsing ---
+
+    #[test]
     fn partial_toml_fills_defaults() {
         let toml_str = r"
 [scan]
 min_lines = 5
 ";
         let config: Config = toml::from_str(toml_str).expect("should parse");
-        assert_eq!(config.scan.min_lines, 5);
+        assert_eq!(config.scan.min_lines, Some(5));
         // Rest should be defaults
-        assert!((config.scan.threshold - 0.7).abs() < f64::EPSILON);
+        assert!((config.scan.threshold - 0.85).abs() < f64::EPSILON);
         assert!(config.normalization.anonymize_locals);
         assert_eq!(config.output.max_results, 50);
     }
@@ -291,7 +643,9 @@ min_lines = 5
     fn full_toml_roundtrip() {
         let toml_str = r#"
 [scan]
-min_lines = 15
+exact_min_lines = 6
+similar_min_lines = 15
+exact_min_stmts = 4
 threshold = 0.8
 exclude = ["vendor/"]
 include = ["src/**/*.py"]
@@ -311,7 +665,9 @@ show_source = false
 context_lines = 5
 "#;
         let config: Config = toml::from_str(toml_str).expect("should parse");
-        assert_eq!(config.scan.min_lines, 15);
+        assert_eq!(config.scan.exact_line_floor(), 6);
+        assert_eq!(config.scan.similar_line_floor(), 15);
+        assert_eq!(config.scan.exact_min_stmts, 4);
         assert!((config.scan.threshold - 0.8).abs() < f64::EPSILON);
         assert_eq!(config.scan.exclude, vec!["vendor/"]);
         assert!(!config.normalization.anonymize_locals);
@@ -325,7 +681,7 @@ context_lines = 5
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("biston.toml"), "[scan]\nmin_lines = 20\n").expect("write");
         let config = Config::load(dir.path()).expect("load");
-        assert_eq!(config.scan.min_lines, 20);
+        assert_eq!(config.scan.min_lines, Some(20));
     }
 
     #[test]
@@ -334,14 +690,15 @@ context_lines = 5
         std::fs::write(dir.path().join("pyproject.toml"), "[tool.biston.scan]\nmin_lines = 25\n")
             .expect("write");
         let config = Config::load(dir.path()).expect("load");
-        assert_eq!(config.scan.min_lines, 25);
+        assert_eq!(config.scan.min_lines, Some(25));
     }
 
     #[test]
     fn load_defaults_when_no_config_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = Config::load(dir.path()).expect("load");
-        assert_eq!(config.scan.min_lines, 10);
+        assert_eq!(config.scan.min_lines, None);
+        assert_eq!(config.scan.exact_line_floor(), 5);
     }
 
     #[test]
@@ -406,11 +763,17 @@ min_lines = 5
     }
 
     #[test]
-    fn scope_to_tests_preserves_threshold_and_min_lines() {
-        let mut config = ScanConfig { min_lines: 25, threshold: 0.85, ..ScanConfig::default() };
+    fn scope_to_tests_preserves_threshold_and_size_floors() {
+        let mut config = ScanConfig {
+            exact_min_lines: Some(7),
+            similar_min_lines: Some(25),
+            threshold: 0.9,
+            ..ScanConfig::default()
+        };
         config.scope_to_tests();
-        assert_eq!(config.min_lines, 25);
-        assert!((config.threshold - 0.85).abs() < f64::EPSILON);
+        assert_eq!(config.exact_line_floor(), 7);
+        assert_eq!(config.similar_line_floor(), 25);
+        assert!((config.threshold - 0.9).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -420,6 +783,6 @@ min_lines = 5
         std::fs::write(dir.path().join("pyproject.toml"), "[tool.biston.scan]\nmin_lines = 25\n")
             .expect("write");
         let config = Config::load(dir.path()).expect("load");
-        assert_eq!(config.scan.min_lines, 20);
+        assert_eq!(config.scan.min_lines, Some(20));
     }
 }

@@ -3,6 +3,8 @@ use std::sync::OnceLock;
 
 use tree_sitter::StreamingIterator;
 
+use crate::config::NormalizationConfig;
+use crate::measure::FragmentSize;
 use crate::parse::ParsedFile;
 
 /// A function extracted from a parsed Python file.
@@ -16,14 +18,30 @@ pub struct FunctionFragment {
     pub byte_range: std::ops::Range<usize>,
     /// The source text of the function.
     pub source_text: String,
+    /// Executable lines and statements, in the units the acceptance tiers use.
+    ///
+    /// Measured once, here, and read everywhere else. The acceptance gates never
+    /// recompute a size from `start_line`/`end_line`: that rectangle counts the
+    /// comments and blank lines this measure exists to exclude.
+    pub size: FragmentSize,
 }
 
-/// Extract all functions from a parsed file that meet the minimum line count.
+/// Extract every function with at least `min_executable_lines` executable lines.
+///
+/// The floor is the *extraction* floor — the shortest function any acceptance tier
+/// could later report. Tier gates are applied when a pair is scored, not here: a
+/// function dropped at extraction cannot be matched at all, so extracting on the
+/// stricter tier's floor would make the looser tier unable to see what it exists
+/// to report.
 #[allow(
     clippy::expect_used,
     reason = "static tree-sitter query is hard-coded; capture names must exist"
 )]
-pub fn extract_functions(parsed: &ParsedFile, min_lines: usize) -> Vec<FunctionFragment> {
+pub fn extract_functions(
+    parsed: &ParsedFile,
+    min_executable_lines: usize,
+    normalization: &NormalizationConfig,
+) -> Vec<FunctionFragment> {
     let query = function_query(&parsed.tree);
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut fragments = Vec::new();
@@ -58,7 +76,18 @@ pub fn extract_functions(parsed: &ParsedFile, min_lines: usize) -> Vec<FunctionF
         let end_line = function_node.end_position().row;
         let line_count = end_line - start_line + 1;
 
-        if line_count < min_lines {
+        // Cheap pre-filter: a function can never have more executable lines than
+        // lines, so anything below the floor on the raw span is below it on the
+        // measure too, and is not worth walking.
+        if line_count < min_executable_lines {
+            continue;
+        }
+
+        // Measure the `function_definition`, not the enclosing `decorated_definition`:
+        // decorators are not part of what is compared.
+        let definition = name_node.parent().unwrap_or(function_node);
+        let size = FragmentSize::of_function(definition, normalization);
+        if size.executable_lines < min_executable_lines {
             continue;
         }
 
@@ -74,6 +103,7 @@ pub fn extract_functions(parsed: &ParsedFile, min_lines: usize) -> Vec<FunctionF
             end_line,
             byte_range,
             source_text,
+            size,
         });
     }
 
@@ -127,7 +157,7 @@ mod tests {
         let body = make_long_body(10);
         let source = format!("def process_data(items):\n{body}\n");
         let parsed = parse(&source);
-        let funcs = extract_functions(&parsed, 10);
+        let funcs = extract_functions(&parsed, 10, &NormalizationConfig::default());
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name, "process_data");
     }
@@ -136,7 +166,7 @@ mod tests {
     fn skips_short_functions() {
         let source = "def tiny():\n    pass\n";
         let parsed = parse(source);
-        let funcs = extract_functions(&parsed, 10);
+        let funcs = extract_functions(&parsed, 10, &NormalizationConfig::default());
         assert!(funcs.is_empty());
     }
 
@@ -146,7 +176,7 @@ mod tests {
         let source =
             format!("def alpha():\n{body}\n\ndef beta():\n{body}\n\ndef gamma():\n    pass\n");
         let parsed = parse(&source);
-        let funcs = extract_functions(&parsed, 10);
+        let funcs = extract_functions(&parsed, 10, &NormalizationConfig::default());
         assert_eq!(funcs.len(), 2);
         assert_eq!(funcs[0].name, "alpha");
         assert_eq!(funcs[1].name, "beta");
@@ -157,7 +187,7 @@ mod tests {
         let body = make_long_body(10);
         let source = format!("@some_decorator\ndef decorated_fn():\n{body}\n");
         let parsed = parse(&source);
-        let funcs = extract_functions(&parsed, 10);
+        let funcs = extract_functions(&parsed, 10, &NormalizationConfig::default());
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name, "decorated_fn");
     }
@@ -167,7 +197,7 @@ mod tests {
         let body = make_long_body(10);
         let source = format!("def my_specific_name(a, b, c):\n{body}\n");
         let parsed = parse(&source);
-        let funcs = extract_functions(&parsed, 10);
+        let funcs = extract_functions(&parsed, 10, &NormalizationConfig::default());
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name, "my_specific_name");
     }
@@ -177,7 +207,7 @@ mod tests {
         let body = make_long_body(10);
         let source = format!("# comment\n\ndef foo():\n{body}\n");
         let parsed = parse(&source);
-        let funcs = extract_functions(&parsed, 10);
+        let funcs = extract_functions(&parsed, 10, &NormalizationConfig::default());
         assert_eq!(funcs.len(), 1);
         // Function starts at line 2 (0-indexed), body has 10 lines
         assert_eq!(funcs[0].start_line, 2);
@@ -193,16 +223,53 @@ mod tests {
         );
         let parsed = parse(&source);
         // With min_lines=10, inner has 11 lines (def + 10 body), outer has more
-        let funcs = extract_functions(&parsed, 10);
+        let funcs = extract_functions(&parsed, 10, &NormalizationConfig::default());
         // Both should be extracted
         assert!(!funcs.is_empty());
         assert!(funcs.iter().any(|f| f.name == "inner"));
     }
 
     #[test]
+    fn the_floor_is_measured_in_executable_lines_not_raw_ones() {
+        // Twelve raw lines, four of them executable. A raw-span floor would keep
+        // this; the executable-line floor is what makes padding stop working.
+        let source = "def padded(a):\n    \"\"\"Prose.\n\n    At length.\n    \"\"\"\n\n                          # explain\n    b = a + 1\n\n    # explain more\n\n    return b\n";
+        let parsed = parse(source);
+        assert_eq!(source.lines().count(), 12, "fixture must be padded to 12 raw lines");
+        assert!(
+            extract_functions(&parsed, 5, &NormalizationConfig::default()).is_empty(),
+            "3 executable lines must not clear a floor of 5"
+        );
+        let kept = extract_functions(&parsed, 3, &NormalizationConfig::default());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].size.executable_lines, 3);
+        assert_eq!(kept[0].size.executable_stmts, 2);
+    }
+
+    #[test]
+    fn a_decorated_function_is_measured_without_its_decorators() {
+        let source = "@register(\"a\")\n@register(\"b\")\ndef small(a):\n    b = a + 1\n                          return b\n";
+        let parsed = parse(source);
+        let funcs = extract_functions(&parsed, 3, &NormalizationConfig::default());
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].size.executable_lines, 3, "the two decorator lines do not count");
+        assert_eq!(funcs[0].start_line, 0, "the reported span still starts at the first decorator");
+    }
+
+    #[test]
+    fn the_reported_size_is_the_one_the_tiers_read() {
+        let body = make_long_body(10);
+        let source = format!("def process_data(items):\n{body}\n");
+        let parsed = parse(&source);
+        let funcs = extract_functions(&parsed, 10, &NormalizationConfig::default());
+        assert_eq!(funcs[0].size.executable_lines, 11, "signature plus ten assignments");
+        assert_eq!(funcs[0].size.executable_stmts, 10);
+    }
+
+    #[test]
     fn no_functions_in_empty_file() {
         let parsed = parse("");
-        let funcs = extract_functions(&parsed, 1);
+        let funcs = extract_functions(&parsed, 1, &NormalizationConfig::default());
         assert!(funcs.is_empty());
     }
 }

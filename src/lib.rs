@@ -12,6 +12,7 @@ pub mod report;
 pub mod similarity;
 pub mod stats;
 pub mod suppress;
+pub mod tier;
 
 use std::path::{Path, PathBuf};
 
@@ -58,11 +59,11 @@ struct ProcessedFunction {
     fragment: FunctionFragment,
     normalized: NormalizedNode,
     hashed: HashedFunction,
-    /// Line span of each top-level body statement, for containment analysis.
+    /// Executable lines of each top-level body statement, for containment analysis.
     ///
     /// `None` unless containment is enabled: the fragment work must be skippable
     /// entirely, not computed and discarded.
-    statement_spans: Option<Vec<(usize, usize)>>,
+    statement_lines: Option<Vec<Vec<usize>>>,
 }
 
 /// Run the full clone detection pipeline on a directory.
@@ -148,18 +149,19 @@ pub fn scan_focused(
     let mut functions = Vec::with_capacity(processed.len());
     let mut normalized = Vec::with_capacity(processed.len());
     let mut hashed = Vec::with_capacity(processed.len());
-    let mut statement_spans = Vec::with_capacity(processed.len());
+    let mut statement_lines = Vec::with_capacity(processed.len());
     for p in processed {
         functions.push(p.fragment);
         normalized.push(p.normalized);
         hashed.push(p.hashed);
-        statement_spans.push(p.statement_spans);
+        statement_lines.push(p.statement_lines);
     }
-    let mut pairs = similarity::find_similar_functions(&hashed, config.scan.threshold);
+    let sizes: Vec<crate::measure::FragmentSize> = functions.iter().map(|f| f.size).collect();
+    let mut pairs = similarity::find_similar_functions(&hashed, &sizes, &config.scan);
 
     // 5. Containment: which functions already implement a leading or trailing run of
     // another's body. Skipped wholesale when disabled.
-    let mut containments = find_containments(config, &normalized, &functions, &statement_spans);
+    let mut containments = find_containments(config, &normalized, &functions, &statement_lines);
 
     // 6. If the caller supplied a focus set, drop findings that don't involve any of
     // the focus files. Full-repo processing above means cross-file clones between
@@ -202,7 +204,7 @@ fn find_containments(
     config: &Config,
     normalized: &[NormalizedNode],
     functions: &[FunctionFragment],
-    statement_spans: &[Option<Vec<(usize, usize)>>],
+    statement_lines: &[Option<Vec<Vec<usize>>>],
 ) -> Vec<ContainmentFinding> {
     if !config.containment.enabled {
         return vec![];
@@ -210,22 +212,22 @@ fn find_containments(
 
     let mut indices = Vec::new();
     let mut statements = Vec::new();
-    let mut spans = Vec::new();
+    let mut per_statement_lines = Vec::new();
     let mut lines = Vec::new();
     for (index, function) in functions.iter().enumerate() {
-        let Some(function_spans) = statement_spans[index].as_deref() else {
+        let Some(function_lines) = statement_lines[index].as_deref() else {
             continue;
         };
         indices.push(index);
         statements.push(hash::body_statements(&normalized[index]));
-        spans.push(function_spans);
+        per_statement_lines.push(function_lines);
         lines.push(function.end_line.saturating_sub(function.start_line) + 1);
     }
 
     let bodies = containment::prepare_bodies(
         &indices,
         &statements,
-        &spans,
+        &per_statement_lines,
         &lines,
         config.normalization.sort_commutative,
     );
@@ -389,7 +391,11 @@ fn process_file(
         return vec![];
     }
 
-    let fragments = extract::extract_functions(&parsed, config.scan.min_lines);
+    let fragments = extract::extract_functions(
+        &parsed,
+        config.scan.extraction_line_floor(),
+        &config.normalization,
+    );
 
     // Filter out inline-suppressed functions
     let fragments: Vec<_> = fragments
@@ -422,28 +428,28 @@ fn process_file(
                 normalize::normalize_function(func_node, &parsed.source, &config.normalization);
             let hashed =
                 hash::hash_function(&normalized, 0, 5, config.normalization.sort_commutative);
-            let statement_spans =
-                config.containment.enabled.then(|| body_statement_spans(func_node));
-            ProcessedFunction { fragment, normalized, hashed, statement_spans }
+            let statement_lines = config
+                .containment
+                .enabled
+                .then(|| body_statement_lines(func_node, &config.normalization));
+            ProcessedFunction { fragment, normalized, hashed, statement_lines }
         })
         .collect()
 }
 
-/// Line span (0-indexed, inclusive) of each top-level statement in a function body.
+/// Executable lines (0-indexed, ascending) of each top-level statement in a body.
 ///
-/// Parallel to [`hash::body_statements`] of the same function: normalization keeps one
-/// node per named child of the `block` *except* the ones it drops entirely, so the
-/// same statements are skipped here — otherwise the spans stop lining up with the
-/// statements they describe and containment reports the wrong lines.
-fn body_statement_spans(func_node: tree_sitter::Node<'_>) -> Vec<(usize, usize)> {
-    let Some(block) = func_node.child_by_field_name("body") else {
-        return vec![];
-    };
-    let mut cursor = block.walk();
-    block
-        .named_children(&mut cursor)
-        .filter(|statement| !normalize::leaves_no_trace(*statement))
-        .map(|statement| (statement.start_position().row, statement.end_position().row))
+/// Parallel to [`hash::body_statements`] of the same function: [`measure`] walks the
+/// same statements normalization keeps, so a statement's lines always describe the
+/// statement they are attributed to. Containment measures its runs from these, which
+/// is what makes a fragment floor a floor on *executable* lines rather than on the
+/// rectangle the statements happen to occupy.
+fn body_statement_lines(
+    func_node: tree_sitter::Node<'_>,
+    normalization: &crate::config::NormalizationConfig,
+) -> Vec<Vec<usize>> {
+    measure::body_statements(func_node)
+        .map(|statement| measure::executable_line_numbers(statement, normalization))
         .collect()
 }
 

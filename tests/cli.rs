@@ -213,7 +213,7 @@ fn overview_containment_json_counts_findings() {
 }
 
 #[test]
-fn scan_containment_json_declares_schema_version_two() {
+fn scan_containment_json_declares_the_current_schema_version() {
     let dir = containment_dir();
     let output = Command::cargo_bin("biston")
         .unwrap()
@@ -224,8 +224,12 @@ fn scan_containment_json_declares_schema_version_two() {
         .stdout
         .clone();
     let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(parsed["schema_version"], 2);
+    assert_eq!(parsed["schema_version"], 3);
     assert_eq!(parsed["containments"][0]["role"], "suffix", "got: {parsed}");
+    assert_eq!(
+        parsed["containments"][0]["tier"], "exact",
+        "every finding names the tier that accepted it: {parsed}"
+    );
 }
 
 #[test]

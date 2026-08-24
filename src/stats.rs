@@ -5,6 +5,7 @@ use rustc_hash::FxHashSet;
 use serde::Serialize;
 
 use crate::report::{cluster_pairs, CloneReport};
+use crate::tier::Tier;
 
 /// Statistics computed from a clone detection report.
 #[derive(Debug, Serialize)]
@@ -37,6 +38,21 @@ pub struct ScanStats {
     pub similarity: Option<SimilarityStats>,
     /// Breakdown of pairs by similarity range.
     pub breakdown: SimilarityBreakdown,
+    /// Breakdown of pairs by the acceptance tier that admitted them.
+    ///
+    /// Distinct from `breakdown`, which bins the *score*: a pair can score 1.0 and
+    /// still be a `similar`-tier finding when it cleared the fuzzy rule rather than
+    /// the exact one.
+    pub tiers: TierBreakdown,
+}
+
+/// Counts of clone pairs by acceptance tier.
+#[derive(Debug, Serialize)]
+pub struct TierBreakdown {
+    /// Pairs accepted by the exact tier.
+    pub exact: usize,
+    /// Pairs accepted by the similar tier.
+    pub similar: usize,
 }
 
 /// Min/max/average similarity across all clone pairs.
@@ -101,6 +117,11 @@ pub fn compute_stats(report: &CloneReport) -> ScanStats {
         }
     }
 
+    let tiers = TierBreakdown {
+        exact: report.pairs.iter().filter(|p| p.tier == Tier::Exact).count(),
+        similar: report.pairs.iter().filter(|p| p.tier == Tier::Similar).count(),
+    };
+
     ScanStats {
         files_scanned: report.files_scanned,
         functions_extracted: report.functions.len(),
@@ -111,6 +132,7 @@ pub fn compute_stats(report: &CloneReport) -> ScanStats {
         files_with_clones,
         similarity,
         breakdown: SimilarityBreakdown { exact, near, similar },
+        tiers,
     }
 }
 
@@ -148,6 +170,11 @@ pub fn format_stats_text(stats: &ScanStats) -> String {
     let _ = writeln!(out, "  Exact clones (1.0):       {}", stats.breakdown.exact);
     let _ = writeln!(out, "  Near clones (0.9-1.0):    {}", stats.breakdown.near);
     let _ = writeln!(out, "  Similar (<0.9):           {}", stats.breakdown.similar);
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Accepted by tier:");
+    let _ = writeln!(out, "  exact:                    {}", stats.tiers.exact);
+    let _ = writeln!(out, "  similar:                  {}", stats.tiers.similar);
     out
 }
 
@@ -173,11 +200,14 @@ mod tests {
             end_line: end,
             byte_range: 0..100,
             source_text: format!("def {name}():\n    pass\n"),
+            size: crate::measure::FragmentSize { executable_lines: 12, executable_stmts: 6 },
         }
     }
 
     fn make_pair(left: usize, right: usize, similarity: f64) -> SimilarPair {
-        SimilarPair { left, right, similarity }
+        let tier =
+            if (similarity - 1.0).abs() < f64::EPSILON { Tier::Exact } else { Tier::Similar };
+        SimilarPair { left, right, similarity, tier }
     }
 
     #[test]

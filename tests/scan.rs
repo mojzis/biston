@@ -166,13 +166,17 @@ fn containment_ignores_a_lexically_nested_function() {
 
 #[test]
 fn containment_supersedes_the_symmetric_pair() {
-    // The append fixture is *also* found by symmetric detection (Jaccard 0.71).
-    // Reporting both says the same thing twice, and the directed form is the more
-    // actionable one, so the symmetric pair must be suppressed.
-    let plain = biston::scan(&fixtures_path(), &config_for_file("containment_append.py")).unwrap();
+    // The append fixture is *also* found by symmetric detection, at Jaccard 0.71 —
+    // below the default threshold, so this test lowers it to make the overlap the
+    // suppression exists for actually happen. Reporting both says the same thing
+    // twice, and the directed form is the more actionable one.
+    let mut plain_config = config_for_file("containment_append.py");
+    plain_config.scan.threshold = 0.7;
+    let plain = biston::scan(&fixtures_path(), &plain_config).unwrap();
     assert_eq!(plain.pairs.len(), 1, "symmetric detection should find this pair on its own");
 
-    let config = config_for_file_with_containment("containment_append.py");
+    let mut config = config_for_file_with_containment("containment_append.py");
+    config.scan.threshold = 0.7;
     let report = biston::scan(&fixtures_path(), &config).unwrap();
     assert_eq!(report.containments.len(), 1);
     assert!(report.pairs.is_empty(), "containment must supersede the symmetric pair");

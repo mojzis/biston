@@ -355,11 +355,18 @@ mod tests {
             end_line: end,
             byte_range: 0..100,
             source_text: format!("def {name}():\n    pass\n"),
+            size: crate::measure::FragmentSize { executable_lines: 12, executable_stmts: 6 },
         }
     }
 
+    /// A pair tagged with the tier its score would have been accepted by.
     fn make_pair(left: usize, right: usize, similarity: f64) -> SimilarPair {
-        SimilarPair { left, right, similarity }
+        let tier = if (similarity - 1.0).abs() < f64::EPSILON {
+            crate::tier::Tier::Exact
+        } else {
+            crate::tier::Tier::Similar
+        };
+        SimilarPair { left, right, similarity, tier }
     }
 
     fn make_report(functions: Vec<FunctionFragment>, pairs: Vec<SimilarPair>) -> CloneReport {
