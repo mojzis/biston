@@ -413,7 +413,8 @@ impl Config {
         let scan = &self.scan;
         anyhow::ensure!(
             scan.exact_line_floor() <= scan.similar_line_floor(),
-            "scan.exact_min_lines ({}) must not exceed scan.similar_min_lines ({}):              an exact match is stronger evidence than a fuzzy one, so it cannot              require more of it",
+            "scan.exact_min_lines ({}) must not exceed scan.similar_min_lines ({}): an \
+             exact match is stronger evidence than a fuzzy one, so it cannot ask for more",
             scan.exact_line_floor(),
             scan.similar_line_floor(),
         );
@@ -431,7 +432,8 @@ impl Config {
         let containment = &self.containment;
         anyhow::ensure!(
             containment.exact_fragment_floor() <= containment.similar_fragment_floor(),
-            "containment.exact_min_fragment_lines ({}) must not exceed              containment.similar_min_fragment_lines ({})",
+            "containment.exact_min_fragment_lines ({}) must not exceed \
+             containment.similar_min_fragment_lines ({})",
             containment.exact_fragment_floor(),
             containment.similar_fragment_floor(),
         );
