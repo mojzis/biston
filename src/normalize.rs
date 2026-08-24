@@ -86,19 +86,10 @@ fn normalize_node(
 ) -> NormalizedNode {
     let kind = node.kind();
 
-    // Strip type annotations
-    if config.strip_type_annotations && is_type_annotation_node(kind) {
+    // Decorators and type annotations are replaced by a contentless placeholder:
+    // the node kind survives, nothing inside it does.
+    if strips_to_placeholder(node, config) {
         return NormalizedNode { kind, text: None, children: vec![], byte_range: None };
-    }
-
-    // Strip decorators
-    if config.strip_decorators && kind == "decorator" {
-        return NormalizedNode {
-            kind: "decorator",
-            text: None,
-            children: vec![],
-            byte_range: None,
-        };
     }
 
     // Collect locals from binding constructs before recursing into children
@@ -188,6 +179,20 @@ fn normalize_node(
 /// statement; the two must agree or the spans stop lining up with the statements.
 pub(crate) fn leaves_no_trace(node: tree_sitter::Node<'_>) -> bool {
     node.kind() == "comment" || is_docstring(node)
+}
+
+/// Whether normalization keeps the node's *kind* but nothing of its contents.
+///
+/// Decorators and type annotations become contentless placeholders, so no token
+/// inside them survives. [`crate::measure`] needs the same answer when it counts
+/// the lines a function's surviving tokens occupy, so both callers ask here.
+pub(crate) fn strips_to_placeholder(
+    node: tree_sitter::Node<'_>,
+    config: &NormalizationConfig,
+) -> bool {
+    let kind = node.kind();
+    (config.strip_type_annotations && is_type_annotation_node(kind))
+        || (config.strip_decorators && kind == "decorator")
 }
 
 /// A node's text with the given spans and all whitespace removed.
