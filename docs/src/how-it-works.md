@@ -29,7 +29,7 @@ Each stage lives in its own module:
 |-------|--------|--------------|
 | discovery | `src/discovery.rs` | Walks the tree with the `ignore` crate; respects `.gitignore`, include/exclude globs. Test directories and migrations are excluded by default. |
 | parse | `src/parse.rs` | Feeds each file into tree-sitter-python, yields a concrete syntax tree. |
-| extract | `src/extract.rs` | Slices out every `function_definition` as a `FunctionFragment`. |
+| extract | `src/extract.rs` | Slices out every `function_definition` as a `FunctionFragment`, keeping the ones with enough *executable* lines for some tier to accept later. |
 | normalize | `src/normalize.rs` | Converts each fragment into a `NormalizedNode` tree — a canonical form. |
 | hash | `src/hash.rs` | xxhash3 over the normalized tree: one full-depth root hash for exact matching, plus a set of depth-truncated subtree hashes as the fingerprint. |
 | similarity | `src/similarity.rs` | MinHash over the fingerprint, banded LSH for bucketing, exact Jaccard for scoring. |
@@ -43,6 +43,8 @@ Supporting modules:
 |--------|------|
 | `src/config.rs` | TOML config loader (`biston.toml` or `[tool.biston]` in `pyproject.toml`). |
 | `src/suppress.rs` | Config-level file globs plus inline `# biston: ignore` comments. |
+| `src/measure.rs` | The one definition of an executable line and an executable statement — the units every size floor is expressed in. |
+| `src/tier.rs` | Acceptance tiers: which of `exact` / `similar` admits a finding, if either does. |
 | `src/stats.rs` | Aggregate counts used by the `stats` subcommand. |
 | `src/lib.rs` | Public `scan()` API; `src/main.rs` wraps it with a `clap` CLI. |
 
@@ -99,7 +101,11 @@ Comparing every function pairwise is O(n²) and unaffordable on a real repo. bis
 
 The band layout is derived from `threshold` rather than configured directly, and the permutation count is internal — there is no user-facing band knob. A larger band count means more candidate pairs (recall up, precision down); longer bands mean fewer hits (recall down, precision up).
 
-Only pairs whose similarity meets the `threshold` (default `0.7`) end up in the report.
+Scoring is not the last word. A scored pair still has to clear an **acceptance
+tier** — required evidence scales inversely with the strength of the match, so a
+short *exact* duplicate is reported while a short *fuzzy* one is not, and every
+reported finding is tagged with the tier that accepted it. See
+[How acceptance works](acceptance.md).
 
 ### What is not reportable
 
@@ -167,7 +173,7 @@ Config lives in `biston.toml` or under `[tool.biston]` in `pyproject.toml`. CLI 
 Test suites accumulate their own kind of duplication — near-identical cases that could collapse into `@pytest.mark.parametrize`, copy-pasted arrange/act/assert blocks, repeated fixture plumbing — but that noise usually drowns out production-code findings when mixed into the same report. biston splits the two:
 
 - **By default**, the `scan.exclude` globs (`tests/**`, `**/conftest.py`, `migrations/**`) drop test files at the discovery stage, so `biston scan` and `biston stats` only see your application code.
-- **`--tests-only`** (on both `scan` and `stats`) inverts the scope: `include` is replaced with common Python test patterns (`**/test_*.py`, `**/*_test.py`, `**/conftest.py`, `tests/**/*.py`, `**/tests/**/*.py` — the last covering monorepo layouts like `backend/tests/helpers.py`), and `exclude` is cleared. Other knobs (`min_lines`, `threshold`, normalization) are untouched; tune them in `biston.toml` if your tests want a different baseline than your production code.
+- **`--tests-only`** (on both `scan` and `stats`) inverts the scope: `include` is replaced with common Python test patterns (`**/test_*.py`, `**/*_test.py`, `**/conftest.py`, `tests/**/*.py`, `**/tests/**/*.py` — the last covering monorepo layouts like `backend/tests/helpers.py`), and `exclude` is cleared. Other knobs (the size floors, `threshold`, normalization) are untouched; tune them in `biston.toml` if your tests want a different baseline than your production code.
 
 Run the two passes separately (e.g. two CI steps, or two cached runs against the same repo) to keep the signal clean.
 

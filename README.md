@@ -36,7 +36,10 @@ Arguments:
 
 Options:
       --format <FORMAT>        Output format [possible values: text, json, sarif]
-      --min-lines <MIN_LINES>  Minimum function length in lines
+      --min-lines <MIN_LINES>  Minimum function length in executable lines (alias: sets both tier floors)
+      --exact-min-lines <N>    Executable lines the shorter function needs for an exact match [default: 5]
+      --similar-min-lines <N>  Executable lines the shorter function needs for a fuzzy match [default: 9]
+      --exact-min-stmts <N>    Statements a body needs for an exact match [default: 3]
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
       --tests-only             Restrict the scan to Python test files (overrides include/exclude)
@@ -59,7 +62,10 @@ Arguments:
 
 Options:
       --format <FORMAT>        Output format [possible values: text, json, sarif]
-      --min-lines <MIN_LINES>  Minimum function length in lines
+      --min-lines <MIN_LINES>  Minimum function length in executable lines (alias: sets both tier floors)
+      --exact-min-lines <N>    Executable lines the shorter function needs for an exact match [default: 5]
+      --similar-min-lines <N>  Executable lines the shorter function needs for a fuzzy match [default: 9]
+      --exact-min-stmts <N>    Statements a body needs for an exact match [default: 3]
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
       --tests-only             Restrict the scan to Python test files (overrides include/exclude)
@@ -105,10 +111,18 @@ Settings can go in `biston.toml` or under `[tool.biston]` in `pyproject.toml`. I
 
 | Setting | Default | Description |
 |---|---|---|
-| `min_lines` | `10` | Minimum function length in lines |
-| `threshold` | `0.7` | Similarity threshold (0.0–1.0) |
+| `exact_min_lines` | `5` | Executable lines the shorter function needs for an **exact** match to be reported |
+| `similar_min_lines` | `9` | Executable lines the shorter function needs for a **fuzzy** match to be reported |
+| `exact_min_stmts` | `3` | Statements a body needs for an exact match to be reported (exact tier only) |
+| `threshold` | `0.85` | Similarity threshold for the fuzzy tier (0.0–1.0) |
+| `min_lines` | — | Retained alias: sets both line floors at once |
 | `exclude` | `["tests/**", "**/conftest.py", "migrations/**"]` | File patterns to exclude |
 | `include` | `["**/*.py"]` | File patterns to include |
+
+Floors are counted in **executable lines** — source lines holding at least one token
+that survives normalization. Comments, docstrings and blank lines never count. See
+[How acceptance works](https://mojzis.github.io/biston/acceptance.html) for the two
+tier tables and the reasoning behind them.
 
 ### `[normalization]`
 
@@ -147,7 +161,9 @@ another's body. Off by default; see [Containment](https://mojzis.github.io/bisto
 | Setting | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Enable containment detection (or pass `--containment`) |
-| `min_fragment_lines` | `15` | Minimum executable lines in the matched run |
+| `exact_min_fragment_lines` | `10` | Executable lines an **exactly** matched run needs |
+| `similar_min_fragment_lines` | `15` | Executable lines a **fuzzily** matched run needs |
+| `min_fragment_lines` | — | Retained alias: sets both fragment floors at once |
 | `min_ratio` | `0.30` | Contained function size / container size |
 | `threshold` | `0.85` | Minimum containment coefficient (0.0–1.0) |
 | `size_balance` | `1.25` | Largest tolerated size ratio between the function and the run |
@@ -164,7 +180,8 @@ another's body. Off by default; see [Containment](https://mojzis.github.io/bisto
 
 ```toml
 [scan]
-min_lines = 15
+exact_min_lines = 6
+similar_min_lines = 15
 threshold = 0.8
 exclude = ["vendor/"]
 include = ["src/**/*.py"]

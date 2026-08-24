@@ -25,8 +25,6 @@
 //! guard-return pair, `try: ... except: pass` — and counting a `try` block's
 //! contents would let exactly those shapes clear the floor they are meant to fail.
 
-use rustc_hash::FxHashSet;
-
 use crate::config::NormalizationConfig;
 use crate::normalize::{is_literal_kind, leaves_no_trace, strips_to_placeholder};
 
@@ -59,9 +57,7 @@ impl FragmentSize {
 /// See the [module documentation](self) for what does and does not count.
 #[must_use]
 pub fn executable_lines(node: tree_sitter::Node<'_>, config: &NormalizationConfig) -> usize {
-    let mut lines = FxHashSet::default();
-    collect_executable_lines(node, config, &mut lines);
-    lines.len()
+    executable_line_numbers(node, config).len()
 }
 
 /// The executable lines of a node, 0-indexed and in ascending order.
@@ -73,10 +69,8 @@ pub fn executable_line_numbers(
     node: tree_sitter::Node<'_>,
     config: &NormalizationConfig,
 ) -> Vec<usize> {
-    let mut lines = FxHashSet::default();
+    let mut lines = Vec::new();
     collect_executable_lines(node, config, &mut lines);
-    let mut lines: Vec<usize> = lines.into_iter().collect();
-    lines.sort_unstable();
     lines
 }
 
@@ -87,18 +81,31 @@ pub fn executable_line_numbers(
 /// once, which is what makes this a count of *lines* rather than of statements.
 #[must_use]
 pub fn distinct_line_count<'a>(lists: impl Iterator<Item = &'a [usize]>) -> usize {
-    let mut seen: FxHashSet<usize> = FxHashSet::default();
+    // The lists are ascending and the statements they come from are in source order,
+    // so at most the boundary line of two adjacent statements can repeat.
+    let mut count = 0;
+    let mut last: Option<usize> = None;
     for list in lists {
-        seen.extend(list.iter().copied());
+        for &line in list {
+            if last != Some(line) {
+                count += 1;
+                last = Some(line);
+            }
+        }
     }
-    seen.len()
+    count
 }
 
-/// Collect the lines of every surviving token below `node`.
+/// Collect the lines of every surviving token below `node`, in ascending order.
+///
+/// Children are visited in source order and tree-sitter nodes do not overlap, so the
+/// lines arrive sorted: `lines` stays deduplicated by comparing against its tail,
+/// with no set and no sort. That matters — this runs once per extracted function
+/// over the whole subtree, and hashing every token's line showed up in the profile.
 fn collect_executable_lines(
     node: tree_sitter::Node<'_>,
     config: &NormalizationConfig,
-    lines: &mut FxHashSet<usize>,
+    lines: &mut Vec<usize>,
 ) {
     if leaves_no_trace(node) || strips_to_placeholder(node, config) {
         return;
@@ -107,18 +114,27 @@ fn collect_executable_lines(
     // Literals are leaves to normalization even when the grammar gives them named
     // children (`string` → `string_start` / `string_content`), so they are leaves
     // here too. A multi-line string occupies every line it spans.
-    if !is_literal_kind(node.kind()) {
-        let mut cursor = node.walk();
-        let mut named_children = node.named_children(&mut cursor).peekable();
-        if named_children.peek().is_some() {
-            for child in named_children {
+    let children = if is_literal_kind(node.kind()) { 0 } else { node.named_child_count() };
+    if children > 0 {
+        // Indexed access rather than `node.walk()`: a cursor is a heap allocation,
+        // and this walk visits every internal node of every extracted function.
+        for index in 0..u32::try_from(children).unwrap_or(u32::MAX) {
+            if let Some(child) = node.named_child(index) {
                 collect_executable_lines(child, config, lines);
             }
-            return;
         }
+        return;
     }
 
-    lines.extend(node.start_position().row..=node.end_position().row);
+    let start = node.start_position().row;
+    let end = node.end_position().row;
+    let first = match lines.last() {
+        Some(&previous) if previous >= start => previous + 1,
+        _ => start,
+    };
+    // Empty when the leaf sits entirely on lines already counted — a second token
+    // on a line adds nothing.
+    lines.extend(first..=end);
 }
 
 /// Number of top-level body statements that survive normalization.
