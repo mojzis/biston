@@ -49,6 +49,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   old shape of the policy, set `min_lines = 10` and `threshold = 0.7` — but note that
   even under the alias the floor is now measured in executable lines.
 
+  The full before/after comparison — indexed functions, LSH candidate pairs, runtime,
+  reported pairs by tier, and a read of every newly reported short exact pair — is in
+  [`bench/results-size-aware-tiers.md`](bench/results-size-aware-tiers.md).
+
 - **Size floors are measured in executable lines.** An executable line is a distinct
   source line holding at least one token that survives AST normalization; comments,
   docstrings and blank lines never count, two statements on one line are one line,
@@ -64,7 +68,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   similar_min_lines)` executable lines**, so the exact tier can see the short
   duplicates it exists to report. The indexed population on the corpus above grows
   from 6,622 functions to 8,622 (+30%); LSH candidate pairs are effectively
-  unchanged (3,164 → 3,191, +0.9%).
+  unchanged (3,164 → 3,191, +0.9%), because the same change *removes* the prose-heavy
+  functions whose outline-shaped fingerprints collided with everything. Runtime on a
+  100K-line corpus grows 12–15%, inside the 15% budget set for this change.
 
 ### Added
 
