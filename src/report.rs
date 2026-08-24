@@ -669,39 +669,16 @@ pub fn format_sarif(report: &CloneReport, _config: &OutputConfig) -> anyhow::Res
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-
-    fn make_func(name: &str, file: &str, start: usize, end: usize) -> FunctionFragment {
-        FunctionFragment {
-            name: name.to_owned(),
-            file_path: PathBuf::from(file),
-            start_line: start,
-            end_line: end,
-            byte_range: 0..100,
-            source_text: format!("def {name}():\n    pass\n"),
-            size: crate::measure::FragmentSize { executable_lines: 12, executable_stmts: 6 },
-        }
-    }
-
-    /// A pair tagged with the tier its score would have been accepted by.
-    fn make_pair(left: usize, right: usize, similarity: f64) -> SimilarPair {
-        let tier = if (similarity - 1.0).abs() < f64::EPSILON {
-            crate::tier::Tier::Exact
-        } else {
-            crate::tier::Tier::Similar
-        };
-        SimilarPair { left, right, similarity, tier }
-    }
+    use crate::testing::{fragment, pair};
 
     /// A report with one containment finding and no symmetric pairs.
     fn containment_report() -> CloneReport {
         CloneReport {
             files_scanned: 2,
             functions: vec![
-                make_func("normalize_records", "a.py", 11, 26),
-                make_func("load_then_normalize", "b.py", 39, 57),
+                fragment("normalize_records", "a.py", 11, 26),
+                fragment("load_then_normalize", "b.py", 39, 57),
             ],
             normalized: vec![],
             pairs: vec![],
@@ -769,7 +746,7 @@ mod tests {
     fn json_omits_containments_when_there_are_none() {
         let report = CloneReport {
             containments: vec![],
-            pairs: vec![make_pair(0, 1, 0.9)],
+            pairs: vec![pair(0, 1, 0.9)],
             ..containment_report()
         };
         let json = format_json(&report, &OutputConfig::default()).unwrap();
@@ -802,7 +779,7 @@ mod tests {
 
     #[test]
     fn transitive_closure() {
-        let pairs = vec![make_pair(0, 1, 0.9), make_pair(1, 2, 0.8)];
+        let pairs = vec![pair(0, 1, 0.9), pair(1, 2, 0.8)];
         let clusters = cluster_pairs(&pairs, 3);
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].members.len(), 3);
@@ -810,14 +787,14 @@ mod tests {
 
     #[test]
     fn independent_clusters() {
-        let pairs = vec![make_pair(0, 1, 0.9), make_pair(2, 3, 0.8)];
+        let pairs = vec![pair(0, 1, 0.9), pair(2, 3, 0.8)];
         let clusters = cluster_pairs(&pairs, 4);
         assert_eq!(clusters.len(), 2);
     }
 
     #[test]
     fn single_pair_cluster() {
-        let pairs = vec![make_pair(0, 1, 0.85)];
+        let pairs = vec![pair(0, 1, 0.85)];
         let clusters = cluster_pairs(&pairs, 2);
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].members.len(), 2);
@@ -836,12 +813,9 @@ mod tests {
     fn text_format_single_cluster() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -858,12 +832,9 @@ mod tests {
     fn text_format_with_clones_mentions_suppression() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -915,13 +886,13 @@ mod tests {
         let report = CloneReport {
             files_scanned: 4,
             functions: vec![
-                make_func("a", "a.py", 0, 10),
-                make_func("b", "b.py", 0, 10),
-                make_func("c", "c.py", 0, 10),
-                make_func("d", "d.py", 0, 10),
+                fragment("a", "a.py", 0, 10),
+                fragment("b", "b.py", 0, 10),
+                fragment("c", "c.py", 0, 10),
+                fragment("d", "d.py", 0, 10),
             ],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.9), make_pair(2, 3, 0.8)],
+            pairs: vec![pair(0, 1, 0.9), pair(2, 3, 0.8)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -938,12 +909,9 @@ mod tests {
     fn text_format_color_header_contains_ansi() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -959,12 +927,9 @@ mod tests {
     fn text_format_color_function_names_highlighted() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -981,12 +946,9 @@ mod tests {
     fn text_format_no_color_no_ansi() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -1002,12 +964,9 @@ mod tests {
     fn json_format_valid_json() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -1022,12 +981,9 @@ mod tests {
     fn json_format_contains_expected_fields() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -1049,12 +1005,9 @@ mod tests {
     fn sarif_format_valid_json() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -1068,12 +1021,9 @@ mod tests {
     fn sarif_format_has_required_fields() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![
-                make_func("foo", "src/a.py", 0, 10),
-                make_func("bar", "src/b.py", 5, 15),
-            ],
+            functions: vec![fragment("foo", "src/a.py", 0, 10), fragment("bar", "src/b.py", 5, 15)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),

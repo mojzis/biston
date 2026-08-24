@@ -102,17 +102,35 @@ impl ContainmentConfig {
     /// Executable lines an exactly-matched run must span.
     #[must_use]
     pub fn exact_fragment_floor(&self) -> usize {
-        self.exact_min_fragment_lines
-            .or(self.min_fragment_lines)
-            .unwrap_or(Self::DEFAULT_EXACT_MIN_FRAGMENT_LINES)
+        self.exact_fragment_source().1
     }
 
     /// Executable lines a fuzzily-matched run must span.
     #[must_use]
     pub fn similar_fragment_floor(&self) -> usize {
-        self.similar_min_fragment_lines
-            .or(self.min_fragment_lines)
-            .unwrap_or(Self::DEFAULT_SIMILAR_MIN_FRAGMENT_LINES)
+        self.similar_fragment_source().1
+    }
+
+    /// The exact fragment floor, with the name of the key that supplied it.
+    fn exact_fragment_source(&self) -> (&'static str, usize) {
+        floor_source(
+            "exact_min_fragment_lines",
+            self.exact_min_fragment_lines,
+            self.min_fragment_lines,
+            "min_fragment_lines",
+        )
+        .unwrap_or(("exact_min_fragment_lines", Self::DEFAULT_EXACT_MIN_FRAGMENT_LINES))
+    }
+
+    /// The fuzzy fragment floor, with the name of the key that supplied it.
+    fn similar_fragment_source(&self) -> (&'static str, usize) {
+        floor_source(
+            "similar_min_fragment_lines",
+            self.similar_min_fragment_lines,
+            self.min_fragment_lines,
+            "min_fragment_lines",
+        )
+        .unwrap_or(("similar_min_fragment_lines", Self::DEFAULT_SIMILAR_MIN_FRAGMENT_LINES))
     }
 
     /// Shortest run either tier could accept.
@@ -263,13 +281,29 @@ impl ScanConfig {
     /// Executable lines the shorter function of an exact match must have.
     #[must_use]
     pub fn exact_line_floor(&self) -> usize {
-        self.exact_min_lines.or(self.min_lines).unwrap_or(Self::DEFAULT_EXACT_MIN_LINES)
+        self.exact_line_source().1
     }
 
     /// Executable lines the shorter function of a fuzzy match must have.
     #[must_use]
     pub fn similar_line_floor(&self) -> usize {
-        self.similar_min_lines.or(self.min_lines).unwrap_or(Self::DEFAULT_SIMILAR_MIN_LINES)
+        self.similar_line_source().1
+    }
+
+    /// The exact floor, with the name of the key that supplied it.
+    ///
+    /// Errors quote the key the user actually wrote: telling someone their
+    /// `exact_min_lines` is wrong when their file only says `min_lines` sends them
+    /// looking for a line that does not exist.
+    fn exact_line_source(&self) -> (&'static str, usize) {
+        floor_source("exact_min_lines", self.exact_min_lines, self.min_lines, "min_lines")
+            .unwrap_or(("exact_min_lines", Self::DEFAULT_EXACT_MIN_LINES))
+    }
+
+    /// The fuzzy floor, with the name of the key that supplied it.
+    fn similar_line_source(&self) -> (&'static str, usize) {
+        floor_source("similar_min_lines", self.similar_min_lines, self.min_lines, "min_lines")
+            .unwrap_or(("similar_min_lines", Self::DEFAULT_SIMILAR_MIN_LINES))
     }
 
     /// Shortest function either tier could accept, and so the extraction floor.
@@ -411,18 +445,14 @@ impl Config {
     /// results that look plausible.
     pub fn validate(&self) -> anyhow::Result<()> {
         let scan = &self.scan;
+        let (exact_key, exact) = scan.exact_line_source();
+        let (similar_key, similar) = scan.similar_line_source();
         anyhow::ensure!(
-            scan.exact_line_floor() <= scan.similar_line_floor(),
-            "scan.exact_min_lines ({}) must not exceed scan.similar_min_lines ({}): an \
+            exact <= similar,
+            "scan.{exact_key} ({exact}) must not exceed scan.{similar_key} ({similar}): an \
              exact match is stronger evidence than a fuzzy one, so it cannot ask for more",
-            scan.exact_line_floor(),
-            scan.similar_line_floor(),
         );
-        anyhow::ensure!(
-            scan.exact_line_floor() >= 1,
-            "scan.exact_min_lines must be at least 1, got {}",
-            scan.exact_line_floor(),
-        );
+        anyhow::ensure!(exact >= 1, "scan.{exact_key} must be at least 1, got {exact}");
         anyhow::ensure!(
             scan.exact_min_stmts >= 1,
             "scan.exact_min_stmts must be at least 1, got {}",
@@ -430,20 +460,26 @@ impl Config {
         );
 
         let containment = &self.containment;
+        let (exact_key, exact) = containment.exact_fragment_source();
+        let (similar_key, similar) = containment.similar_fragment_source();
         anyhow::ensure!(
-            containment.exact_fragment_floor() <= containment.similar_fragment_floor(),
-            "containment.exact_min_fragment_lines ({}) must not exceed \
-             containment.similar_min_fragment_lines ({})",
-            containment.exact_fragment_floor(),
-            containment.similar_fragment_floor(),
+            exact <= similar,
+            "containment.{exact_key} ({exact}) must not exceed \
+             containment.{similar_key} ({similar})",
         );
-        anyhow::ensure!(
-            containment.exact_fragment_floor() >= 1,
-            "containment.exact_min_fragment_lines must be at least 1, got {}",
-            containment.exact_fragment_floor(),
-        );
+        anyhow::ensure!(exact >= 1, "containment.{exact_key} must be at least 1, got {exact}");
         Ok(())
     }
+}
+
+/// Which of a tier key and its alias supplied a floor, if either did.
+fn floor_source(
+    key: &'static str,
+    value: Option<usize>,
+    alias_value: Option<usize>,
+    alias: &'static str,
+) -> Option<(&'static str, usize)> {
+    value.map(|v| (key, v)).or_else(|| alias_value.map(|v| (alias, v)))
 }
 
 /// Warn once when a retained alias is set alongside the keys that supersede it.
@@ -464,9 +500,11 @@ fn warn_if_alias_shadowed(
     if set.is_empty() {
         return;
     }
+    let names: Vec<String> = set.iter().map(|key| format!("{section}.{key}")).collect();
+    let verb = if names.len() == 1 { "takes" } else { "take" };
     tracing::warn!(
-        "{section}.{alias} is ignored: {} also set and take(s) precedence",
-        set.iter().map(|key| format!("{section}.{key}")).collect::<Vec<_>>().join(" and "),
+        "{section}.{alias} is ignored: {} also set and {verb} precedence",
+        names.join(" and ")
     );
 }
 
@@ -576,6 +614,27 @@ mod tests {
         let config: Config = toml::from_str(toml_str).expect("parse");
         let err = config.validate().expect_err("inverted fragment floors must not be accepted");
         assert!(err.to_string().contains("exact_min_fragment_lines"), "got: {err}");
+    }
+
+    #[test]
+    fn the_error_names_the_key_the_user_actually_wrote() {
+        // Reporting `exact_min_lines` to someone whose file only says `min_lines`
+        // sends them looking for a line that does not exist.
+        let config: Config =
+            toml::from_str("[scan]\nmin_lines = 20\nsimilar_min_lines = 5\n").expect("parse");
+        let message = config.validate().expect_err("inverted floors").to_string();
+        assert!(message.contains("scan.min_lines (20)"), "got: {message}");
+        assert!(message.contains("scan.similar_min_lines (5)"), "got: {message}");
+        assert!(!message.contains("exact_min_lines"), "the user never wrote it: {message}");
+    }
+
+    #[test]
+    fn the_fragment_error_names_the_key_the_user_actually_wrote() {
+        let toml_str = "[containment]\nmin_fragment_lines = 20\nsimilar_min_fragment_lines = 5\n";
+        let config: Config = toml::from_str(toml_str).expect("parse");
+        let message = config.validate().expect_err("inverted floors").to_string();
+        assert!(message.contains("containment.min_fragment_lines (20)"), "got: {message}");
+        assert!(!message.contains("exact_min_fragment_lines"), "got: {message}");
     }
 
     #[test]

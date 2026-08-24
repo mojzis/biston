@@ -11,10 +11,18 @@
 //!
 //! An **executable line** is a distinct source line holding at least one token that
 //! survives AST normalization. Comment-only lines, docstring lines and blank lines
-//! hold no such token and never count. Neither do lines holding nothing but
-//! punctuation (a lone `)` closing a multi-line call): normalization keeps named
-//! nodes, and a delimiter is not one. Two statements on one line (`a = 1; b = 2`)
-//! are one executable line — and two executable statements.
+//! hold no such token and never count.
+//!
+//! Normalization keeps *named* nodes, so a line carrying nothing else does not count
+//! either — a lone `)` closing a multi-line call, and equally a bare clause keyword:
+//! `try:`, `else:`, `finally:`. The clause's structure survives (as an `else_clause`
+//! node, say), but nothing on that line does, and the alternative — crediting a line
+//! for a node whose content lives further down — would credit a `def` line for its
+//! whole body. The bias is towards measuring less, which is the safe direction for a
+//! floor.
+//!
+//! Two statements on one line (`a = 1; b = 2`) are one executable line — and two
+//! executable statements.
 //!
 //! # Executable statements
 //!
@@ -272,6 +280,21 @@ mod tests {
             size.executable_lines, 5,
             "def, `a = call(`, `1,`, `2,`, `return a` — the lone `)` line carries no token"
         );
+    }
+
+    #[test]
+    fn a_bare_clause_keyword_line_does_not_count() {
+        // `try:` and `else:` carry no named node of their own. Like a lone `)`, the
+        // line is structure rather than content, and the measure leans towards
+        // counting less.
+        let source = "def f(a):\n    try:\n        b = risky(a)\n    except ValueError:\n                              b = None\n    else:\n        b = check(b)\n    return b\n";
+        let size = measure(source);
+        assert_eq!(
+            size.executable_lines, 6,
+            "the `def`, three assignments, `except ValueError:` and the `return` — \
+             not `try:` and not `else:`"
+        );
+        assert_eq!(size.executable_stmts, 2, "the `try` and the `return`");
     }
 
     #[test]

@@ -172,7 +172,7 @@ pub fn format_stats_text(stats: &ScanStats) -> String {
     let _ = writeln!(out, "  Similar (<0.9):           {}", stats.breakdown.similar);
 
     let _ = writeln!(out);
-    let _ = writeln!(out, "Accepted by tier:");
+    let _ = writeln!(out, "Clone pairs by tier:");
     let _ = writeln!(out, "  exact:                    {}", stats.tiers.exact);
     let _ = writeln!(out, "  similar:                  {}", stats.tiers.similar);
     out
@@ -185,30 +185,9 @@ pub fn format_stats_json(stats: &ScanStats) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::extract::FunctionFragment;
-    use crate::similarity::SimilarPair;
     use crate::suppress::SuppressionStats;
-
-    fn make_func(name: &str, file: &str, start: usize, end: usize) -> FunctionFragment {
-        FunctionFragment {
-            name: name.to_owned(),
-            file_path: PathBuf::from(file),
-            start_line: start,
-            end_line: end,
-            byte_range: 0..100,
-            source_text: format!("def {name}():\n    pass\n"),
-            size: crate::measure::FragmentSize { executable_lines: 12, executable_stmts: 6 },
-        }
-    }
-
-    fn make_pair(left: usize, right: usize, similarity: f64) -> SimilarPair {
-        let tier =
-            if (similarity - 1.0).abs() < f64::EPSILON { Tier::Exact } else { Tier::Similar };
-        SimilarPair { left, right, similarity, tier }
-    }
+    use crate::testing::{fragment, pair};
 
     #[test]
     fn stats_empty_report() {
@@ -238,9 +217,9 @@ mod tests {
     fn stats_single_exact_pair() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![make_func("foo", "a.py", 0, 10), make_func("bar", "b.py", 0, 10)],
+            functions: vec![fragment("foo", "a.py", 0, 10), fragment("bar", "b.py", 0, 10)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 1.0)],
+            pairs: vec![pair(0, 1, 1.0)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -266,16 +245,16 @@ mod tests {
         let report = CloneReport {
             files_scanned: 3,
             functions: vec![
-                make_func("a", "x.py", 0, 10),
-                make_func("b", "x.py", 20, 30),
-                make_func("c", "y.py", 0, 10),
-                make_func("d", "z.py", 0, 10),
+                fragment("a", "x.py", 0, 10),
+                fragment("b", "x.py", 20, 30),
+                fragment("c", "y.py", 0, 10),
+                fragment("d", "z.py", 0, 10),
             ],
             normalized: vec![],
             pairs: vec![
-                make_pair(0, 1, 1.0),  // exact
-                make_pair(0, 2, 0.95), // near
-                make_pair(2, 3, 0.75), // similar
+                pair(0, 1, 1.0),  // exact
+                pair(0, 2, 0.95), // near
+                pair(2, 3, 0.75), // similar
             ],
             containments: vec![],
             suggestions: vec![],
@@ -303,9 +282,9 @@ mod tests {
     fn stats_same_file_clones() {
         let report = CloneReport {
             files_scanned: 1,
-            functions: vec![make_func("a", "same.py", 0, 10), make_func("b", "same.py", 20, 30)],
+            functions: vec![fragment("a", "same.py", 0, 10), fragment("b", "same.py", 20, 30)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.85)],
+            pairs: vec![pair(0, 1, 0.85)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -320,12 +299,12 @@ mod tests {
         let report = CloneReport {
             files_scanned: 3,
             functions: vec![
-                make_func("a", "a.py", 0, 10),
-                make_func("b", "b.py", 0, 10),
-                make_func("c", "c.py", 0, 10),
+                fragment("a", "a.py", 0, 10),
+                fragment("b", "b.py", 0, 10),
+                fragment("c", "c.py", 0, 10),
             ],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.9)],
+            pairs: vec![pair(0, 1, 0.9)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -342,9 +321,9 @@ mod tests {
     fn text_format_includes_key_stats() {
         let report = CloneReport {
             files_scanned: 5,
-            functions: vec![make_func("a", "a.py", 0, 10), make_func("b", "b.py", 0, 10)],
+            functions: vec![fragment("a", "a.py", 0, 10), fragment("b", "b.py", 0, 10)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.95)],
+            pairs: vec![pair(0, 1, 0.95)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -362,7 +341,7 @@ mod tests {
     fn text_format_no_clones_shows_zero() {
         let report = CloneReport {
             files_scanned: 3,
-            functions: vec![make_func("a", "a.py", 0, 10), make_func("b", "b.py", 0, 10)],
+            functions: vec![fragment("a", "a.py", 0, 10), fragment("b", "b.py", 0, 10)],
             normalized: vec![],
             pairs: vec![],
             containments: vec![],
@@ -380,9 +359,9 @@ mod tests {
     fn json_format_valid() {
         let report = CloneReport {
             files_scanned: 2,
-            functions: vec![make_func("a", "a.py", 0, 10), make_func("b", "b.py", 0, 10)],
+            functions: vec![fragment("a", "a.py", 0, 10), fragment("b", "b.py", 0, 10)],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.9)],
+            pairs: vec![pair(0, 1, 0.9)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),
@@ -400,7 +379,7 @@ mod tests {
     fn json_format_no_pairs_null_similarity() {
         let report = CloneReport {
             files_scanned: 1,
-            functions: vec![make_func("a", "a.py", 0, 10)],
+            functions: vec![fragment("a", "a.py", 0, 10)],
             normalized: vec![],
             pairs: vec![],
             containments: vec![],
@@ -418,13 +397,13 @@ mod tests {
         let report = CloneReport {
             files_scanned: 2,
             functions: vec![
-                make_func("a", "a.py", 0, 10),
-                make_func("b", "b.py", 0, 10),
-                make_func("c", "c.py", 0, 10),
-                make_func("d", "d.py", 0, 10),
+                fragment("a", "a.py", 0, 10),
+                fragment("b", "b.py", 0, 10),
+                fragment("c", "c.py", 0, 10),
+                fragment("d", "d.py", 0, 10),
             ],
             normalized: vec![],
-            pairs: vec![make_pair(0, 1, 0.9)],
+            pairs: vec![pair(0, 1, 0.9)],
             containments: vec![],
             suggestions: vec![],
             suppression_stats: SuppressionStats::default(),

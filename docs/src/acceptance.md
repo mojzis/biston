@@ -84,8 +84,9 @@ lines.
 Consequently:
 
 - Comment-only lines, docstring lines (single- and multi-line) and blank lines never
-  count. Neither does a line holding nothing but a delimiter — the `)` closing a
-  multi-line call.
+  count. Neither does a line holding nothing but structure — the `)` closing a
+  multi-line call, or a bare clause keyword (`try:`, `else:`, `finally:`). The bias
+  is towards measuring less, which is the safe direction for a floor.
 - Two statements on one line (`a = 1; b = 2`) are **one** executable line and **two**
   executable statements.
 - A line continuation counts every line that holds a token.
@@ -163,6 +164,9 @@ its `similarity`: one exact pair does not vouch for the fuzzy ones grouped with 
 
 `sarif` puts it in the result message and in `properties.tier`.
 
-`stats` counts findings by tier under `Accepted by tier`, alongside the existing
+`overview` colours a function's bullet by the tier of its best partner, and
+`overview --format json` carries `tier` on every clone partner.
+
+`stats` counts findings by tier under `Clone pairs by tier`, alongside the existing
 breakdown by score — which is a different question: a pair can score 1.0 and still be
 a `similar`-tier finding, when it cleared the fuzzy rule rather than the exact one.

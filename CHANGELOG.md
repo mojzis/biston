@@ -97,6 +97,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **Diagnostics now go to stderr.** The tracing subscriber wrote warnings to stdout,
+  so a single warning — an unparseable file, an ignored config alias — landed in the
+  middle of the report and made `--format json` unparseable for whatever consumed
+  it. The report is stdout; everything else is stderr.
+
 - **Comments and docstrings now leave no trace in the normalized tree
   (behavior-changing).** Normalization used to replace each comment and docstring
   with an empty placeholder node that stayed in the tree. The placeholders

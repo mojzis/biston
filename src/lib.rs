@@ -16,6 +16,9 @@ pub mod tier;
 
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 
@@ -89,6 +92,11 @@ pub fn scan_focused(
     config: &Config,
     focus_files: Option<&[PathBuf]>,
 ) -> anyhow::Result<CloneReport> {
+    // Library callers build a `Config` by hand and never see the CLI's checks. A
+    // configuration no scan could honour — an exact floor above the fuzzy one — is
+    // better refused here than answered with plausible-looking results.
+    config.validate()?;
+
     let focus_set = focus_files.map(canonicalize_focus_set);
 
     // 1. Discover files

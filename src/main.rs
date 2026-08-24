@@ -306,7 +306,11 @@ fn read_file_list(source: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Diagnostics go to stderr, where the default subscriber does not put them. The
+    // report is stdout, and a warning printed into it — an ignored config alias, an
+    // unparseable file — makes `--format json` unparseable for whatever consumes it.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
             |_| tracing_subscriber::EnvFilter::new(verbosity_filter(cli.verbose, cli.quiet)),
         ))

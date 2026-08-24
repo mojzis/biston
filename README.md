@@ -40,6 +40,8 @@ Options:
       --exact-min-lines <N>    Executable lines the shorter function needs for an exact match [default: 5]
       --similar-min-lines <N>  Executable lines the shorter function needs for a fuzzy match [default: 9]
       --exact-min-stmts <N>    Statements a body needs for an exact match [default: 3]
+      --exact-min-fragment-lines <N>    Executable lines an exactly-matched contained run needs [default: 10]
+      --similar-min-fragment-lines <N>  Executable lines a fuzzily-matched contained run needs [default: 15]
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
       --tests-only             Restrict the scan to Python test files (overrides include/exclude)
@@ -66,6 +68,8 @@ Options:
       --exact-min-lines <N>    Executable lines the shorter function needs for an exact match [default: 5]
       --similar-min-lines <N>  Executable lines the shorter function needs for a fuzzy match [default: 9]
       --exact-min-stmts <N>    Statements a body needs for an exact match [default: 3]
+      --exact-min-fragment-lines <N>    Executable lines an exactly-matched contained run needs [default: 10]
+      --similar-min-fragment-lines <N>  Executable lines a fuzzily-matched contained run needs [default: 15]
       --threshold <THRESHOLD>  Similarity threshold (0.0 - 1.0)
       --config <CONFIG>        Config file directory (looks for biston.toml or pyproject.toml)
       --tests-only             Restrict the scan to Python test files (overrides include/exclude)
@@ -84,7 +88,7 @@ biston scan --tests-only
 biston stats --tests-only
 ```
 
-The flag replaces `include` with common Python test patterns (`**/test_*.py`, `**/*_test.py`, `**/conftest.py`, `tests/**/*.py`) and clears `exclude`. Other knobs (`min_lines`, `threshold`, normalization) are left untouched — tune them separately in `biston.toml` if you want different defaults for a test run.
+The flag replaces `include` with common Python test patterns (`**/test_*.py`, `**/*_test.py`, `**/conftest.py`, `tests/**/*.py`) and clears `exclude`. Other knobs (the size floors, `threshold`, normalization) are left untouched — tune them separately in `biston.toml` if you want different defaults for a test run.
 
 #### Commit-hook use (focus files)
 
