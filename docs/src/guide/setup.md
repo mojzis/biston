@@ -40,7 +40,7 @@ For a commit hook, with pre-commit or prek:
 
 ```yaml
 - repo: https://github.com/mojzis/biston
-  rev: v0.6.0
+  rev: v0.7.0
   hooks:
     - id: biston
 ```
