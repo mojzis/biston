@@ -4,6 +4,19 @@ A structural clone detector for Python code. Written in Rust.
 
 It parses Python files with [tree-sitter](https://tree-sitter.github.io/tree-sitter/), normalizes the AST, and finds functions that are structurally similar to each other.
 
+## Working with a coding agent
+
+biston explains itself, so you do not have to. Hand your agent one line:
+
+> Run `uvx biston guide` at the root of this repo and follow what it says.
+
+It prints what to do at the moment you are actually in -- how to install and
+wire biston up when the repo has no config, and what to do with each finding
+when it does. When a scan reports clones, its footer points the agent at
+`biston guide triage`, so a failed check leads back to the instructions on its
+own. See [`biston guide`](#biston-guide) for the three topics and how one is
+chosen.
+
 ## Install
 
 ```
@@ -54,8 +67,8 @@ Options:
 
 #### `biston guide`
 
-Print short, self-contained instructions for the moment you are in. Designed to
-be read by a coding agent running `uvx biston guide` inside a repository.
+Print short, self-contained instructions for the moment you are in. Written to
+be read by a coding agent -- see [Working with a coding agent](#working-with-a-coding-agent).
 
 ```
 Usage: biston guide [TOPIC]
