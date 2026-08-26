@@ -845,7 +845,7 @@ mod tests {
         assert!(text.contains("Clone cluster #1"), "report should contain a finding");
         // Findings should teach the reader how to silence a false positive.
         assert!(text.contains("# biston: ignore"), "hint should show the inline comment");
-        assert!(text.contains("biston usage"), "hint should point at the usage command");
+        assert!(text.contains("biston guide triage"), "footer should point at the triage guide");
     }
 
     #[test]
@@ -862,7 +862,7 @@ mod tests {
         let config = OutputConfig::default();
         let text = format_text(&report, &config);
         // No findings means nothing to suppress — keep the output quiet.
-        assert!(!text.contains("biston usage"), "no hint when there are no clones");
+        assert!(!text.contains("biston guide triage"), "no footer when there are no clones");
     }
 
     #[test]

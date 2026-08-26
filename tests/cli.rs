@@ -38,7 +38,7 @@ fn stats_fixtures_shows_statistics() {
         .unwrap()
         .args(["stats", &fixtures_dir()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("Scan statistics:"))
         .stdout(predicate::str::contains("Clone pairs:"))
         .stdout(predicate::str::contains("Clone clusters:"));
@@ -50,7 +50,7 @@ fn stats_json_format_valid() {
         .unwrap()
         .args(["stats", &fixtures_dir(), "--format", "json"])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::starts_with("{"));
 }
 
@@ -67,42 +67,6 @@ fn stats_json_contains_expected_fields() {
     assert!(json["clone_pairs"].is_u64());
     assert!(json["clone_clusters"].is_u64());
     assert!(json["breakdown"].is_object());
-}
-
-// --- Usage subcommand tests ---
-
-#[test]
-fn usage_command_explains_inline_comments() {
-    Command::cargo_bin("biston")
-        .unwrap()
-        .arg("usage")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("# biston: ignore-file"))
-        .stdout(predicate::str::contains("# biston: ignore"))
-        .stdout(predicate::str::contains("[suppress]"));
-}
-
-#[test]
-fn scan_with_clones_mentions_suppression() {
-    Command::cargo_bin("biston")
-        .unwrap()
-        .args(["scan", &fixtures_dir()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("# biston: ignore"))
-        .stdout(predicate::str::contains("biston usage"));
-}
-
-#[test]
-fn overview_with_clones_mentions_suppression() {
-    Command::cargo_bin("biston")
-        .unwrap()
-        .args(["overview", &fixtures_dir()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("# biston: ignore"))
-        .stdout(predicate::str::contains("biston usage"));
 }
 
 // --- Scan subcommand tests ---
@@ -153,7 +117,7 @@ fn scan_with_containment_flag_reports_the_direction() {
         .unwrap()
         .args(["scan", "--containment", dir.path().to_str().unwrap()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("is already implemented by normalize_records"))
         .stdout(predicate::str::contains("call it instead"));
 }
@@ -165,7 +129,7 @@ fn stats_counts_containment_separately_from_clone_pairs() {
         .unwrap()
         .args(["stats", "--containment", "--format", "json", dir.path().to_str().unwrap()])
         .assert()
-        .success()
+        .code(1)
         .get_output()
         .stdout
         .clone();
@@ -219,7 +183,7 @@ fn scan_containment_json_declares_the_current_schema_version() {
         .unwrap()
         .args(["scan", "--containment", "--format", "json", dir.path().to_str().unwrap()])
         .assert()
-        .success()
+        .code(1)
         .get_output()
         .stdout
         .clone();
@@ -249,7 +213,7 @@ fn scan_fixtures_detects_clones() {
         .unwrap()
         .args(["scan", &fixtures_dir()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("Clone cluster #1"));
 }
 
@@ -272,7 +236,7 @@ fn scan_reports_comment_only_differences_as_an_exact_clone() {
         .unwrap()
         .args(["scan", dir.path().to_str().unwrap()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("Clone cluster #1"))
         .stdout(predicate::str::contains("aggregate_totals"))
         .stdout(predicate::str::contains("aggregate_sums"))
@@ -287,7 +251,12 @@ fn scan_json_reports_comment_only_differences_at_similarity_one() {
         .args(["scan", dir.path().to_str().unwrap(), "--format", "json"])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "findings exit 1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let clusters = json["clusters"].as_array().expect("clusters array");
     assert_eq!(clusters.len(), 1, "expected exactly one cluster, got {json}");
@@ -308,7 +277,7 @@ fn scan_json_format_valid() {
         .unwrap()
         .args(["scan", &fixtures_dir(), "--format", "json"])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::starts_with("{"));
 }
 
@@ -326,7 +295,7 @@ fn an_alias_conflict_warns_on_stderr_and_leaves_json_parseable() {
         .unwrap()
         .args(["scan", dir.path().to_str().unwrap(), "--format", "json"])
         .assert()
-        .success()
+        .code(1)
         .stderr(predicate::str::contains("scan.min_lines is ignored"))
         .stderr(predicate::str::contains("scan.exact_min_lines"))
         .get_output()
@@ -360,7 +329,7 @@ fn scan_sarif_format_valid() {
         .unwrap()
         .args(["scan", &fixtures_dir(), "--format", "sarif"])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("sarif-schema"));
 }
 
@@ -370,7 +339,7 @@ fn suggest_flag_produces_output() {
         .unwrap()
         .args(["scan", "--suggest", &fixtures_dir()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("Suggested abstraction"));
 }
 
@@ -380,7 +349,7 @@ fn suggest_flag_json_includes_suggestions() {
         .unwrap()
         .args(["scan", "--suggest", "--format", "json", &fixtures_dir()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("suggestions"));
 }
 
@@ -460,7 +429,7 @@ def test_beta():
         .unwrap()
         .args(["scan", "--tests-only", dir.path().to_str().unwrap()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("Clone cluster #1"))
         .stdout(predicate::str::contains("test_alpha"))
         .stdout(predicate::str::contains("test_beta"));
@@ -555,7 +524,7 @@ fn scan_files_from_stdin_reads_list() {
         .args(["scan", "--format", "json", "--files-from", "-", "."])
         .write_stdin("a.py\n")
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::function(|out: &str| {
             let json: serde_json::Value = serde_json::from_str(out).expect("valid json");
             cluster_count(&json) == 1
@@ -581,8 +550,8 @@ fn scan_focus_args_matches_files_flag() {
         .output()
         .unwrap();
 
-    assert!(via_focus_args.status.success(), "focus-args invocation should succeed");
-    assert!(via_files.status.success(), "files invocation should succeed");
+    assert_eq!(via_focus_args.status.code(), Some(1), "focus-args run reports findings");
+    assert_eq!(via_files.status.code(), Some(1), "files run reports findings");
     let focus_json: serde_json::Value =
         serde_json::from_slice(&via_focus_args.stdout).expect("valid json");
     let files_json: serde_json::Value =
@@ -657,8 +626,8 @@ fn stats_focus_args_matches_files_flag() {
         .output()
         .unwrap();
 
-    assert!(via_focus_args.status.success());
-    assert!(via_files.status.success());
+    assert_eq!(via_focus_args.status.code(), Some(1), "a scan that reports findings exits 1");
+    assert_eq!(via_files.status.code(), Some(1), "a scan that reports findings exits 1");
     let focus_json: serde_json::Value =
         serde_json::from_slice(&via_focus_args.stdout).expect("valid json");
     let files_json: serde_json::Value =
@@ -730,7 +699,7 @@ fn precommit_style_focus_reports_only_involved_cluster() {
         .args(["scan", "--focus-args", "--format", "json", "a.py"])
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(1), "a scan that reports findings exits 1");
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     assert_eq!(cluster_count(&json), 1, "only the a↔b cluster should remain");
     let cluster = &json["clusters"][0];
@@ -836,7 +805,7 @@ fn color_always_emits_ansi() {
         .unwrap()
         .args(["--color", "always", "scan", &fixtures_dir()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("\x1b["));
 }
 
@@ -846,7 +815,7 @@ fn color_never_suppresses_ansi() {
         .unwrap()
         .args(["--color", "never", "scan", &fixtures_dir()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("\x1b[").not());
 }
 
@@ -861,7 +830,7 @@ fn no_color_env_suppresses_ansi() {
         .env("NO_COLOR", "1")
         .args(["--color", "always", "scan", &fixtures_dir()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("\x1b["));
 }
 
@@ -872,18 +841,18 @@ fn no_color_env_suppresses_ansi_in_auto_mode() {
         .env("NO_COLOR", "1")
         .args(["scan", &fixtures_dir()])
         .assert()
-        .success()
+        .code(1)
         .stdout(predicate::str::contains("\x1b[").not());
 }
 
 #[test]
 fn verbose_flag_accepted() {
-    Command::cargo_bin("biston").unwrap().args(["-v", "scan", &fixtures_dir()]).assert().success();
+    Command::cargo_bin("biston").unwrap().args(["-v", "scan", &fixtures_dir()]).assert().code(1);
 }
 
 #[test]
 fn quiet_flag_accepted() {
-    Command::cargo_bin("biston").unwrap().args(["-q", "scan", &fixtures_dir()]).assert().success();
+    Command::cargo_bin("biston").unwrap().args(["-q", "scan", &fixtures_dir()]).assert().code(1);
 }
 
 #[test]
@@ -904,4 +873,320 @@ fn completions_zsh_outputs_script() {
         .assert()
         .success()
         .stdout(predicate::str::contains("#compdef biston"));
+}
+
+// --- Guide subcommand ---
+
+/// The docs pages are the guide text. Comparing CLI output against them is what
+/// keeps the site and the terminal byte-identical; a snapshot copied into the
+/// test would just be a third version to forget to update.
+const SETUP_DOC: &str = include_str!("../docs/src/guide/setup.md");
+const TRIAGE_DOC: &str = include_str!("../docs/src/guide/triage.md");
+const TUNE_DOC: &str = include_str!("../docs/src/guide/tune.md");
+
+fn guide_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::cargo_bin("biston")
+        .expect("the biston binary should be built")
+        .current_dir(dir)
+        .arg("guide")
+        .args(args)
+        .output()
+        .expect("guide should run");
+    assert!(output.status.success(), "guide should exit 0, got {:?}", output.status.code());
+    String::from_utf8(output.stdout).expect("guide output is UTF-8")
+}
+
+#[test]
+fn guide_setup_snapshot_matches_the_docs_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = guide_in(dir.path(), &["setup"]);
+    assert_eq!(out, format!("# biston guide: setup\n\n{SETUP_DOC}"));
+}
+
+#[test]
+fn guide_triage_snapshot_matches_the_docs_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = guide_in(dir.path(), &["triage"]);
+    assert_eq!(out, format!("# biston guide: triage\n\n{TRIAGE_DOC}"));
+}
+
+#[test]
+fn guide_tune_snapshot_matches_the_docs_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = guide_in(dir.path(), &["tune"]);
+    assert_eq!(out, format!("# biston guide: tune\n\n{TUNE_DOC}"));
+}
+
+#[test]
+fn guide_auto_selects_setup_when_nothing_is_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = guide_in(dir.path(), &[]);
+    assert_eq!(out, format!("# biston guide: not configured here -> setup\n\n{SETUP_DOC}"));
+}
+
+#[test]
+fn guide_auto_selects_triage_from_biston_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("biston.toml"), "[scan]\nthreshold = 0.9\n").unwrap();
+    let out = guide_in(dir.path(), &[]);
+    assert_eq!(
+        out,
+        format!("# biston guide: configured via biston.toml -> triage\n\n{TRIAGE_DOC}")
+    );
+}
+
+#[test]
+fn guide_auto_selects_triage_from_pyproject() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname = \"x\"\n\n[tool.biston]\n")
+        .unwrap();
+    let out = guide_in(dir.path(), &[]);
+    assert!(
+        out.starts_with("# biston guide: configured via pyproject.toml [tool.biston] -> triage\n"),
+        "header should name the source, got {:?}",
+        out.lines().next(),
+    );
+}
+
+#[test]
+fn guide_auto_selects_setup_when_pyproject_has_no_biston_table() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname = \"x\"\n\n[tool.ruff]\n")
+        .unwrap();
+    let out = guide_in(dir.path(), &[]);
+    assert!(out.starts_with("# biston guide: not configured here -> setup\n"));
+}
+
+#[test]
+fn guide_auto_selects_triage_from_pre_commit_config() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".pre-commit-config.yaml"),
+        "repos:\n  - repo: https://github.com/mojzis/biston\n    rev: v0.6.0\n    hooks:\n      - id: biston\n",
+    )
+    .unwrap();
+    let out = guide_in(dir.path(), &[]);
+    assert!(out.starts_with("# biston guide: configured via .pre-commit-config.yaml -> triage\n"));
+}
+
+#[test]
+fn guide_header_precedence_prefers_the_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("biston.toml"), "[scan]\n").unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.biston]\n").unwrap();
+    std::fs::write(
+        dir.path().join(".pre-commit-config.yaml"),
+        "repos:\n  - repo: https://github.com/mojzis/biston\n",
+    )
+    .unwrap();
+    let out = guide_in(dir.path(), &[]);
+    assert!(
+        out.starts_with("# biston guide: configured via biston.toml -> triage\n"),
+        "config file wins the header, got {:?}",
+        out.lines().next(),
+    );
+}
+
+#[test]
+fn guide_never_auto_selects_tune() {
+    for configured in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        if configured {
+            std::fs::write(dir.path().join("biston.toml"), "[scan]\n").unwrap();
+        }
+        let out = guide_in(dir.path(), &[]);
+        assert!(!out.starts_with("# biston guide: tune"), "tune is reference, never auto-selected");
+        assert!(!out.contains("-> tune"), "tune is reference, never auto-selected");
+    }
+}
+
+#[test]
+fn guide_help_states_the_auto_selection_rule() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["guide", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not configured"))
+        .stdout(predicate::str::contains("never auto-selected"))
+        .stdout(predicate::str::contains("repository root"));
+}
+
+// --- The deprecated `usage` alias ---
+
+#[test]
+fn usage_emits_the_tune_guide() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::cargo_bin("biston")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("usage")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout, format!("# biston guide: tune\n\n{TUNE_DOC}"));
+}
+
+#[test]
+fn usage_warns_that_it_is_deprecated() {
+    let output = Command::cargo_bin("biston").unwrap().arg("usage").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("deprecated") && stderr.contains("biston guide tune"),
+        "the deprecation should name its replacement, got {stderr:?}",
+    );
+}
+
+#[test]
+fn usage_is_absent_from_help() {
+    let output = Command::cargo_bin("biston").unwrap().arg("--help").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("guide"), "guide should be advertised");
+    assert!(!stdout.contains("usage\n"), "the deprecated alias should be hidden: {stdout}");
+    assert!(
+        !stdout.contains("Deprecated alias"),
+        "the deprecated alias should be hidden: {stdout}",
+    );
+}
+
+// --- The footer that leads from a failed gate to the guide ---
+
+#[test]
+fn footer_points_at_the_triage_guide_on_findings() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", &fixtures_dir()])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("biston guide triage"));
+}
+
+#[test]
+fn footer_absent_when_there_are_no_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("biston guide triage").not());
+}
+
+#[test]
+fn footer_absent_from_json_and_sarif() {
+    for format in ["json", "sarif"] {
+        Command::cargo_bin("biston")
+            .unwrap()
+            .args(["scan", &fixtures_dir(), "--format", format])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("biston guide triage").not());
+    }
+}
+
+#[test]
+fn footer_survives_a_non_tty_stdout() {
+    // `assert_cmd` always pipes stdout, so this run is exactly the aggregator's:
+    // no terminal, no colour. The footer must still be there — it is the only
+    // breadcrumb a captured failure leaves behind.
+    let output =
+        Command::cargo_bin("biston").unwrap().args(["scan", &fixtures_dir()]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("biston guide triage"), "footer missing from piped output: {stdout}");
+    assert!(!stdout.contains('\x1b'), "piped output should carry no ANSI escapes");
+}
+
+#[test]
+fn overview_footer_points_at_the_triage_guide() {
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["overview", &fixtures_dir()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("biston guide triage"));
+}
+
+// --- Exit codes ---
+
+#[test]
+fn scan_exits_zero_on_a_clean_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("only.py"), "def solo():\n    return 1\n").unwrap();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", dir.path().to_str().unwrap()])
+        .assert()
+        .code(0);
+}
+
+#[test]
+fn scan_exits_one_on_findings() {
+    Command::cargo_bin("biston").unwrap().args(["scan", &fixtures_dir()]).assert().code(1);
+}
+
+#[test]
+fn stats_exits_zero_on_a_clean_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["stats", dir.path().to_str().unwrap()])
+        .assert()
+        .code(0);
+}
+
+#[test]
+fn stats_exits_one_on_findings() {
+    Command::cargo_bin("biston").unwrap().args(["stats", &fixtures_dir()]).assert().code(1);
+}
+
+#[test]
+fn bad_flag_exits_two() {
+    for subcommand in ["scan", "stats", "overview"] {
+        Command::cargo_bin("biston")
+            .unwrap()
+            .args([subcommand, "--not-a-flag"])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("unexpected argument"));
+    }
+}
+
+#[test]
+fn unreadable_path_exits_two() {
+    // Distinct from the findings code: a gate has to be able to tell "this tree
+    // has duplication" from "biston could not look at this tree".
+    for subcommand in ["scan", "stats"] {
+        Command::cargo_bin("biston")
+            .unwrap()
+            .args([subcommand, "/nonexistent/definitely/not/here"])
+            .assert()
+            .code(2);
+    }
+}
+
+#[test]
+fn invalid_config_exits_two() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("biston.toml"),
+        "[scan]\nexact_min_lines = 20\nsimilar_min_lines = 5\n",
+    )
+    .unwrap();
+    Command::cargo_bin("biston")
+        .unwrap()
+        .args(["scan", dir.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("must not exceed"));
+}
+
+#[test]
+fn a_failing_scan_piped_to_a_shell_still_shows_the_footer() {
+    // The acceptance case: an aggregator captures stdout and reports the exit code.
+    let output =
+        Command::cargo_bin("biston").unwrap().args(["scan", &fixtures_dir()]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "findings must trip the gate");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Run `biston guide triage`"), "got {stdout}");
 }

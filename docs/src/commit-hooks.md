@@ -8,7 +8,7 @@ If you use the [`pre-commit`](https://pre-commit.com) framework (or [`prek`](htt
 
 ```yaml
   - repo: https://github.com/mojzis/biston
-    rev: v0.5.0
+    rev: v0.6.0
     hooks:
       - id: biston
 ```
@@ -33,6 +33,18 @@ What each piece does:
 - The positional `.` — root of the scan. biston still discovers and parses everything under it; the focus list only restricts which pairs make it into the report.
 
 An empty list (no Python files changed) correctly emits no pairs — the hook passes silently. That's why `--files-from -` is the right shape for hooks: `--files $(git diff --name-only)` silently expands to nothing when the diff is empty, which reverts to a full-repo scan and can trip the hook on pre-existing clones unrelated to the commit.
+
+## Exit codes
+
+`scan` and `stats` exit `1` when they report findings and `0` when they do not, so a
+hook fails exactly when the committer's files are involved in a clone. `2` means
+biston could not run at all -- bad usage, an unreadable path, an invalid config --
+which a hook should treat differently from duplication.
+
+The text report of a failing run ends with a footer pointing at
+`biston guide triage`, which is what the committer (or their agent) should read
+next. The footer is printed whether or not stdout is a terminal, and never in
+`json` or `sarif`.
 
 ## Semantics
 

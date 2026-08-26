@@ -16,3 +16,11 @@ publish = false
 
 # Run pre-release checks
 verify = true
+
+# Keep the `rev:` pins in the docs on the release being cut. `guide::tests::
+# setup_pins_the_current_release` fails the build if setup.md drifts, so this is
+# what stops a version bump from tripping it.
+pre-release-replacements = [
+  { file = "docs/src/guide/setup.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
+  { file = "docs/src/commit-hooks.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
+]

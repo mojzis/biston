@@ -558,7 +558,7 @@ mod tests {
         let config = OutputConfig { color: false, ..OutputConfig::default() };
         let text = format_overview_text(&overviews, &report, &config);
         assert!(text.contains("# biston: ignore"), "hint should show the inline comment");
-        assert!(text.contains("biston usage"), "hint should point at the usage command");
+        assert!(text.contains("biston guide triage"), "footer should point at the triage guide");
     }
 
     #[test]
@@ -570,7 +570,7 @@ mod tests {
         let overviews = compute_overview(&report);
         let config = OutputConfig { color: false, ..OutputConfig::default() };
         let text = format_overview_text(&overviews, &report, &config);
-        assert!(!text.contains("biston usage"), "no hint when there are no clones");
+        assert!(!text.contains("biston guide triage"), "no footer when there are no clones");
     }
 
     #[test]

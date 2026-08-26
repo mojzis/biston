@@ -508,6 +508,148 @@ fn warn_if_alias_shadowed(
     );
 }
 
+/// The set of keys the [`Config`] deserializer actually accepts.
+///
+/// Derived from serde rather than listed by hand: a struct's `Deserialize` impl
+/// hands its field list to the `Deserializer`, so a deserializer that captures
+/// that list and stops is asking serde the same question the TOML parser asks.
+/// A hand-written list would be a second source of truth, which is exactly what
+/// the guide-key test exists to catch.
+#[cfg(test)]
+pub(crate) mod keys {
+    use std::collections::BTreeSet;
+    use std::fmt;
+
+    use serde::de::{self, Deserializer, Visitor};
+    use serde::forward_to_deserialize_any;
+
+    use super::{
+        ContainmentConfig, NormalizationConfig, OutputConfig, ScanConfig, SuggestConfig,
+        SuppressConfig,
+    };
+
+    /// Carries the captured field list out through serde's error channel, which is
+    /// the only way out of a `Deserializer` that refuses to produce a value.
+    #[derive(Debug)]
+    pub struct Captured(Vec<&'static str>);
+
+    impl fmt::Display for Captured {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "captured fields: {:?}", self.0)
+        }
+    }
+
+    impl std::error::Error for Captured {}
+
+    impl de::Error for Captured {
+        fn custom<T: fmt::Display>(_msg: T) -> Self {
+            Self(Vec::new())
+        }
+    }
+
+    /// A `Deserializer` that answers "what fields does this struct have?" and
+    /// nothing else.
+    struct FieldCapture;
+
+    impl<'de> Deserializer<'de> for FieldCapture {
+        type Error = Captured;
+
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Captured> {
+            Err(Captured(fields.to_vec()))
+        }
+
+        fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Captured> {
+            Err(Captured(Vec::new()))
+        }
+
+        forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+
+    /// The field names `T`'s derived `Deserialize` will accept.
+    fn field_names<T: serde::de::DeserializeOwned>() -> Vec<&'static str> {
+        match T::deserialize(FieldCapture) {
+            Err(Captured(fields)) => fields,
+            Ok(_) => Vec::new(),
+        }
+    }
+
+    /// The top-level section names, straight from `Config`'s field list.
+    pub fn section_names() -> Vec<&'static str> {
+        field_names::<super::Config>()
+    }
+
+    /// Every accepted key, qualified as `section.key`, plus the bare key names.
+    ///
+    /// Bare names are included because the guides sometimes name a key without its
+    /// section; the qualified form is what catches a key moved between sections.
+    pub fn accepted_keys() -> BTreeSet<String> {
+        let per_section: Vec<(&str, Vec<&'static str>)> = vec![
+            ("scan", field_names::<ScanConfig>()),
+            ("normalization", field_names::<NormalizationConfig>()),
+            ("output", field_names::<OutputConfig>()),
+            ("suggest", field_names::<SuggestConfig>()),
+            ("suppress", field_names::<SuppressConfig>()),
+            ("containment", field_names::<ContainmentConfig>()),
+        ];
+
+        let covered: BTreeSet<&str> = per_section.iter().map(|&(name, _)| name).collect();
+        let declared: BTreeSet<&str> = section_names().into_iter().collect();
+        assert_eq!(
+            covered, declared,
+            "the section list here has drifted from Config's fields; add the new section so its \
+             keys are checked too",
+        );
+
+        let mut out = BTreeSet::new();
+        for (section, fields) in per_section {
+            for field in fields {
+                out.insert(format!("{section}.{field}"));
+                out.insert(field.to_owned());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn capture_reports_the_fields_toml_accepts() {
+        let keys = accepted_keys();
+        assert!(keys.contains("scan.exact_min_lines"), "scan keys should be captured");
+        assert!(keys.contains("containment.max_probes_per_function"), "containment keys too");
+        assert!(keys.contains("suppress.files"), "suppress keys too");
+        assert!(
+            !keys.contains("output.color"),
+            "`color` is #[serde(skip)] and is not a config key",
+        );
+        assert!(!keys.contains("scan.nonexistent_key"), "unknown keys must not be accepted");
+    }
+
+    #[test]
+    fn every_captured_key_actually_parses() {
+        // A key serde claims to accept must survive a real TOML round trip, or the
+        // capture is describing a struct the config loader does not use.
+        for key in ["scan.threshold", "containment.enabled", "output.max_results"] {
+            let (section, field) = key.split_once('.').expect("qualified key");
+            let value = match field {
+                "enabled" => "true",
+                "max_results" => "7",
+                _ => "0.5",
+            };
+            let doc = format!("[{section}]\n{field} = {value}\n");
+            let parsed: Result<super::Config, _> = toml::from_str(&doc);
+            assert!(parsed.is_ok(), "`{key}` should parse, got {:?}", parsed.err());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

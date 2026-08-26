@@ -2,6 +2,12 @@
 
 [Introduction](index.md)
 
+# Guide
+
+- [Setup](guide/setup.md)
+- [Triage](guide/triage.md)
+- [Tune](guide/tune.md)
+
 # Getting Started
 
 - [How It Works](how-it-works.md)
