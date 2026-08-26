@@ -7,7 +7,80 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **`biston guide` prints setup, triage and tune instructions.** Short,
+  imperative, self-contained text for the three moments a coding agent (or a
+  person) meets biston: `setup` when it is not wired into a repository yet,
+  `triage` for turning a scan's findings into edits, `tune` as the reference for
+  suppression, the tier floors and the containment keys.
+
+  `biston guide` with no topic picks between `setup` and `triage` by looking at
+  the current directory: a `biston.toml`, a `[tool.biston]` table in
+  `pyproject.toml`, or a `.pre-commit-config.yaml` referencing the biston hook
+  means configured, and that is the order of precedence the header line reports.
+  Detection never walks up to a repository root -- run it at one. `tune` is a
+  reference and is never auto-selected. The first line of output always names
+  the topic and, when it was chosen automatically, why:
+
+  ```
+  # biston guide: not configured here -> setup
+  # biston guide: configured via pyproject.toml [tool.biston] -> triage
+  ```
+
+  The text lives in `docs/src/guide/*.md` and is compiled in with `include_str!`,
+  so the documentation site and the CLI emit the same bytes. Tests hold it to a
+  60-line cap per topic, check that every command it shows parses through the
+  real clap `Command`, and check that every config key it names is one the
+  `Config` deserializer accepts.
+
+- **Every reported finding names the tier that accepted it.** `text` prints it in
+  the cluster header and the containment detail line, `json` carries a `tier` field
+  on every cluster and containment, and `sarif` puts it in the message and in
+  `properties.tier`. `stats` gains an `Accepted by tier` breakdown, which answers a
+  different question from the existing breakdown by score: a pair can score 1.0 and
+  still be a `similar`-tier finding, when it cleared the fuzzy rule rather than the
+  exact one.
+
+- **JSON schema version 3.** Version 2 added `containments`; version 3 adds `tier`
+  to every cluster and every containment. A cluster's tier is the weakest among its
+  pairs, the same reading as its `similarity`.
+
+- **New config keys and matching CLI flags**: `scan.exact_min_lines`,
+  `scan.similar_min_lines`, `scan.exact_min_stmts`,
+  `containment.exact_min_fragment_lines`, `containment.similar_min_fragment_lines`.
+  `min_lines` and `min_fragment_lines` are **retained aliases**, not deprecated: set
+  on its own, each still means one floor for both tiers. Set alongside a tier key,
+  the tier keys win and a single warning names both. Contradictory floors
+  (`exact_min_lines` above `similar_min_lines`, a floor of zero) are hard errors
+  rather than silently reordered.
+
 ### Changed
+
+- **`scan` and `stats` now exit `1` when they report findings
+  (breaking).** They previously exited `0` whatever they found, so a check
+  aggregator or commit hook running `biston scan .` never tripped on
+  duplication. `0` still means a clean tree, and errors -- bad usage, an
+  unreadable path, an invalid config -- now exit `2` instead of `1`, so a gate
+  can tell "this tree has duplication" from "biston could not look at it".
+  Containment findings count towards `1`, as they are findings the report
+  printed. `overview` is unchanged and still exits `0`: it is a human-facing
+  condensed view, not a gate.
+
+  A script that treated a non-zero exit as failure will start failing on a
+  duplicated tree. That is the point, but it is a behavior change: baseline the
+  repository (`biston guide setup`) before wiring the command into a gate. The
+  shipped `biston-stats` pre-commit hook is affected: it used to emit counts and
+  always pass, and now blocks a commit whose files are involved in a clone. Its
+  description in `.pre-commit-hooks.yaml` has been corrected to say so. `json`
+  and `sarif` output carry no footer, so a hook that stops on `biston-stats`
+  should point its reader at `biston guide triage` itself.
+
+- **The footer under a `scan` / `overview` report now points at
+  `biston guide triage`** instead of `biston usage`. It is still `text`-only,
+  never in `json` or `sarif`, and still printed whether or not stdout is a
+  terminal -- it is the only breadcrumb from a captured, failed gate to the
+  instructions.
 
 - **Acceptance is now two size-aware tiers, `exact` and `similar`
   (behavior-changing under default config).** A single `min_lines` plus a single
@@ -72,28 +145,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   functions whose outline-shaped fingerprints collided with everything. Runtime on a
   100K-line corpus grows 12–15%, inside the 15% budget set for this change.
 
-### Added
+### Deprecated
 
-- **Every reported finding names the tier that accepted it.** `text` prints it in
-  the cluster header and the containment detail line, `json` carries a `tier` field
-  on every cluster and containment, and `sarif` puts it in the message and in
-  `properties.tier`. `stats` gains an `Accepted by tier` breakdown, which answers a
-  different question from the existing breakdown by score: a pair can score 1.0 and
-  still be a `similar`-tier finding, when it cleared the fuzzy rule rather than the
-  exact one.
-
-- **JSON schema version 3.** Version 2 added `containments`; version 3 adds `tier`
-  to every cluster and every containment. A cluster's tier is the weakest among its
-  pairs, the same reading as its `similarity`.
-
-- **New config keys and matching CLI flags**: `scan.exact_min_lines`,
-  `scan.similar_min_lines`, `scan.exact_min_stmts`,
-  `containment.exact_min_fragment_lines`, `containment.similar_min_fragment_lines`.
-  `min_lines` and `min_fragment_lines` are **retained aliases**, not deprecated: set
-  on its own, each still means one floor for both tiers. Set alongside a tier key,
-  the tier keys win and a single warning names both. Contradictory floors
-  (`exact_min_lines` above `similar_min_lines`, a floor of zero) are hard errors
-  rather than silently reordered.
+- **`biston usage` is a hidden alias for `biston guide tune`.** It prints the
+  `tune` text, warns on stderr, and no longer appears in `--help`. It will be
+  removed in the next minor release.
 
 ### Fixed
 

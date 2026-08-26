@@ -12,7 +12,9 @@
 
 - id: biston-stats
   name: biston clone stats
-  description: Emit clone-pair counts for changed files (for CI gating)
+  description: Fail the commit when changed files are in a clone; emits JSON counts
+  # Exits 1 on findings, like `biston`. The JSON payload carries no footer, so a
+  # hook that stops here should point its reader at `biston guide triage`.
   entry: biston stats --focus-args --format json
   language: python
   types: [python]

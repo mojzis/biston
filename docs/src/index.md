@@ -10,6 +10,18 @@ Written in Rust and distributed as a Python package, biston runs fast enough to 
 - **CI pipelines** that want SARIF output wired into code-quality dashboards.
 - **AI coding agents** (and the humans reviewing their PRs) where boilerplate tends to accumulate function by function.
 
+## Working with a coding agent
+
+biston explains itself, so you do not have to. Hand your agent one line:
+
+> Run `uvx biston guide` at the root of this repo and follow what it says.
+
+It prints what to do at the moment you are actually in — [Setup](guide/setup.md)
+when the repo has no biston config, [Triage](guide/triage.md) when it does — and
+a scan that reports clones ends with a footer pointing back at
+`biston guide triage`. [Tune](guide/tune.md) is the reference for suppression
+and the policy keys. The CLI and these pages serve the same bytes.
+
 ## Next
 
 - [How It Works](how-it-works.md) — the pipeline, from discovery to anti-unified templates.

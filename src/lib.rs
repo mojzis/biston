@@ -3,6 +3,7 @@ pub mod config;
 pub mod containment;
 pub mod discovery;
 pub mod extract;
+pub mod guide;
 pub mod hash;
 pub mod measure;
 pub mod normalize;

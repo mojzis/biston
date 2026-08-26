@@ -4,6 +4,19 @@ A structural clone detector for Python code. Written in Rust.
 
 It parses Python files with [tree-sitter](https://tree-sitter.github.io/tree-sitter/), normalizes the AST, and finds functions that are structurally similar to each other.
 
+## Working with a coding agent
+
+biston explains itself, so you do not have to. Hand your agent one line:
+
+> Run `uvx biston guide` at the root of this repo and follow what it says.
+
+It prints what to do at the moment you are actually in -- how to install and
+wire biston up when the repo has no config, and what to do with each finding
+when it does. When a scan reports clones, its footer points the agent at
+`biston guide triage`, so a failed check leads back to the instructions on its
+own. See [`biston guide`](#biston-guide) for the three topics and how one is
+chosen.
+
 ## Install
 
 ```
@@ -51,6 +64,38 @@ Options:
       --files-from <PATH>      Read focus file list from PATH, or `-` for stdin
   -h, --help                   Print help
 ```
+
+#### `biston guide`
+
+Print short, self-contained instructions for the moment you are in. Written to
+be read by a coding agent -- see [Working with a coding agent](#working-with-a-coding-agent).
+
+```
+Usage: biston guide [TOPIC]
+
+Arguments:
+  [TOPIC]  setup, triage or tune. Omit to let biston choose.
+```
+
+With no topic, biston prints `setup` when it is not configured in the current
+directory and `triage` when it is; `tune` is a reference and is never
+auto-selected. Detection looks at the current directory only and never walks up,
+so run it at the repository root. The first line of output always says which
+topic you got and why:
+
+```
+# biston guide: not configured here -> setup
+# biston guide: configured via pyproject.toml [tool.biston] -> triage
+```
+
+A repository counts as configured when it has a `biston.toml`, a
+`[tool.biston]` table in `pyproject.toml`, or a `.pre-commit-config.yaml`
+referencing the biston hook -- named in that order of precedence.
+
+The three pages are also on the docs site: [Setup](https://mojzis.github.io/biston/guide/setup.html),
+[Triage](https://mojzis.github.io/biston/guide/triage.html),
+[Tune](https://mojzis.github.io/biston/guide/tune.html). The CLI and the site
+serve the same bytes.
 
 #### `biston stats`
 
@@ -106,6 +151,17 @@ git diff --name-only --diff-filter=ACM -- '*.py' \
 An empty list (no Python files changed) correctly emits no pairs. Prefer
 `--files-from` over `--files $(git diff --name-only)` — the latter expands to
 an empty flag when nothing changed, which reverts to a full-repo scan.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | `scan` / `stats` found nothing; any other subcommand printed its output |
+| `1` | `scan` / `stats` reported findings (clone pairs or containments) |
+| `2` | biston could not do its job: bad usage, unreadable path, invalid config |
+
+A check aggregator can therefore run `biston scan .` directly, and tell a
+duplicated tree from a broken invocation.
 
 ## Configuration
 
@@ -211,11 +267,8 @@ You can also suppress findings with Python comments:
 - `# biston: ignore` — suppress a single function (place in the function body or on the preceding line)
 
 When `scan` or `overview` reports clones, the text output ends with a one-line
-reminder of these options. Run `biston usage` for the full reference at any time:
-
-```
-biston usage
-```
+footer pointing at `biston guide triage`. The footer is printed whether or not
+stdout is a terminal, and never in `json` or `sarif` output.
 
 ## Documentation
 

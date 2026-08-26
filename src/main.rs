@@ -1,14 +1,29 @@
 use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 use biston::config::{Config, OutputFormat};
+use biston::guide::{self, Topic};
 use biston::overview;
 use biston::report;
 use biston::stats;
+
+/// Nothing to report: the tree is clean, or the subcommand only printed text.
+const EXIT_CLEAN: ExitCode = ExitCode::SUCCESS;
+/// Findings were reported. A check aggregator that never sees this is a gate
+/// that never trips, which is the whole reason `scan` has an exit code at all.
+const EXIT_FINDINGS: ExitCode = ExitCode::FAILURE;
+/// biston could not do its job: bad usage, unreadable path, invalid config.
+/// Distinct from `EXIT_FINDINGS` so a gate can tell "duplication" from "broken",
+/// and matching the code clap already uses for a usage error.
+///
+/// A `u8` rather than an `ExitCode` like its two siblings only because
+/// `ExitCode::from` is not `const`.
+const EXIT_ERROR: u8 = 2;
 
 #[derive(Parser)]
 #[command(name = "biston", about = "Structural clone detector for Python", version)]
@@ -268,7 +283,20 @@ enum Commands {
         common: CommonOpts,
     },
 
-    /// Explain how to suppress findings (inline comments and config globs)
+    /// Print setup, triage or tune instructions for this repository
+    ///
+    /// With no topic, prints `setup` when biston is not configured in the current
+    /// directory and `triage` when it is; `tune` is never auto-selected. Detection
+    /// looks at the current directory only and never walks up, so run this at the
+    /// repository root.
+    Guide {
+        /// Which instructions to print. Omit to let biston choose.
+        #[arg(value_enum)]
+        topic: Option<Topic>,
+    },
+
+    /// Deprecated alias for `biston guide tune`
+    #[command(hide = true)]
     Usage,
 
     /// Print a shell completion script to stdout
@@ -303,7 +331,46 @@ fn read_file_list(source: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn main() -> anyhow::Result<()> {
+/// Map a finished report onto the exit code a check aggregator reads.
+///
+/// Containments count: they are findings the report printed, and a gate that
+/// passed on them would be reporting a clean tree that is not clean.
+fn findings_exit_code(report: &biston::report::CloneReport) -> ExitCode {
+    if report.pairs.is_empty() && report.containments.is_empty() {
+        EXIT_CLEAN
+    } else {
+        EXIT_FINDINGS
+    }
+}
+
+/// Resolve the guide topic and render it.
+///
+/// Auto-selection reads the current directory rather than the scan root: the
+/// question is "is biston set up where I am standing", and the guide tells its
+/// reader to stand at the repository root.
+fn guide_output(topic: Option<Topic>) -> String {
+    if let Some(topic) = topic {
+        guide::render(topic, guide::Selection::Explicit)
+    } else {
+        let source = guide::detect(std::path::Path::new("."));
+        guide::render(guide::auto_topic(source), guide::Selection::Auto(source))
+    }
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(err) => {
+            // Same shape anyhow's own `Termination` prints, so the error text a
+            // user already knows is unchanged; only the code moves, from 1 to 2.
+            eprintln!("Error: {err:?}");
+            ExitCode::from(EXIT_ERROR)
+        }
+    }
+}
+
+/// Everything `main` does, minus the exit-code mapping.
+fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
 
     // Diagnostics go to stderr, where the default subscriber does not put them. The
@@ -340,7 +407,7 @@ fn main() -> anyhow::Result<()> {
 
             print!("{output}");
 
-            Ok(())
+            Ok(findings_exit_code(&report))
         }
         Commands::Overview { common } => {
             let (mut config, scan_path) = common.resolve()?;
@@ -362,7 +429,7 @@ fn main() -> anyhow::Result<()> {
 
             print!("{output}");
 
-            Ok(())
+            Ok(EXIT_CLEAN)
         }
         Commands::Stats { common } => {
             let (config, scan_path) = common.resolve()?;
@@ -378,17 +445,115 @@ fn main() -> anyhow::Result<()> {
 
             print!("{output}");
 
-            Ok(())
+            Ok(findings_exit_code(&report))
+        }
+        Commands::Guide { topic } => {
+            print!("{}", guide_output(topic));
+            Ok(EXIT_CLEAN)
         }
         Commands::Usage => {
-            print!("{}", biston::suppress::suppression_help());
-            Ok(())
+            tracing::warn!(
+                "`biston usage` is deprecated and will be removed in the next minor release; \
+                 run `biston guide tune` instead"
+            );
+            print!("{}", guide::render(Topic::Tune, guide::Selection::Explicit));
+            Ok(EXIT_CLEAN)
         }
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             let name = cmd.get_name().to_string();
             clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
-            Ok(())
+            Ok(EXIT_CLEAN)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Topic};
+    use clap::CommandFactory;
+
+    /// Every biston command the guides show must be one the CLI actually accepts.
+    ///
+    /// This lives here rather than in `src/guide.rs` because `Cli` is defined in
+    /// the binary: the check is only worth anything against the real `Command`,
+    /// aliases, conflicts and all. The extraction it relies on is tested in
+    /// `guide::tests::extraction_finds_every_command_the_guides_show`, so an empty
+    /// list cannot pass as "everything valid".
+    #[test]
+    fn every_command_shown_in_a_guide_parses() {
+        let mut checked = 0_usize;
+        for topic in Topic::ALL {
+            for argv in biston::guide::embedded_invocations(topic) {
+                checked += 1;
+                let parsed = Cli::command().try_get_matches_from(&argv);
+                assert!(
+                    parsed.is_ok(),
+                    "guide `{}` shows `{}`, which the CLI rejects: {}",
+                    topic.name(),
+                    argv.join(" "),
+                    parsed.err().map_or_else(String::new, |e| e.to_string()),
+                );
+            }
+        }
+        assert!(checked >= 6, "expected several commands across the guides, found {checked}");
+    }
+
+    /// Guard the guard: an invocation the CLI would reject must fail this check.
+    #[test]
+    fn an_unknown_flag_would_be_caught() {
+        let argv = ["biston", "scan", "--not-a-flag"];
+        assert!(
+            Cli::command().try_get_matches_from(argv).is_err(),
+            "the command check would pass anything if clap accepted unknown flags",
+        );
+    }
+
+    /// `usage` still runs, and stays out of `--help`.
+    #[test]
+    fn usage_is_hidden_but_still_parses() {
+        assert!(Cli::command().try_get_matches_from(["biston", "usage"]).is_ok());
+        let usage = Cli::command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "usage")
+            .map(clap::Command::is_hide_set);
+        assert_eq!(usage, Some(true), "`usage` is deprecated and should not be advertised");
+    }
+
+    /// The auto-selection rule has to be discoverable from `--help`, since an
+    /// agent that ran `biston guide` with no topic needs to know why it got what
+    /// it got before it trusts it.
+    #[test]
+    fn guide_help_states_the_auto_selection_rule() {
+        let help = Cli::command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "guide")
+            .and_then(clap::Command::get_long_about)
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        assert!(help.contains("setup"), "guide --help should name the setup topic: {help}");
+        assert!(help.contains("triage"), "guide --help should name the triage topic: {help}");
+        assert!(
+            help.contains("never auto-selected"),
+            "guide --help should say tune is never auto-selected: {help}",
+        );
+        assert!(
+            help.contains("repository root"),
+            "guide --help should say where to run it: {help}",
+        );
+    }
+
+    #[test]
+    fn guide_topics_parse_as_values() {
+        for topic in ["setup", "triage", "tune"] {
+            assert!(
+                Cli::command().try_get_matches_from(["biston", "guide", topic]).is_ok(),
+                "`biston guide {topic}` should parse",
+            );
+        }
+        assert!(
+            Cli::command().try_get_matches_from(["biston", "guide", "how"]).is_err(),
+            "an unknown topic should be rejected rather than silently defaulted",
+        );
     }
 }

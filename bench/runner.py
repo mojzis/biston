@@ -113,7 +113,10 @@ def run_biston(
     logger.info("Running: %s", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
-    if result.returncode != 0:
+    # 0 is a clean tree and 1 is "findings reported" -- the bench injects clones on
+    # purpose, so 1 is the expected outcome, not a failure. Anything else (2, a
+    # signal) means biston could not run and the report would be meaningless.
+    if result.returncode not in (0, 1):
         logger.error("biston failed (exit %d): %s", result.returncode, result.stderr)
         msg = f"biston exited with code {result.returncode}"
         raise RuntimeError(msg)
