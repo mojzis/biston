@@ -351,6 +351,19 @@ mod tests {
     }
 
     #[test]
+    fn setup_wires_biston_into_madoqua_and_says_what_the_file_list_does() {
+        // The aesop dogfood set `pass_files = false` blind and lost the diff
+        // scoping: the guide has to say what a trailing file list means.
+        let text = Topic::Setup.text();
+        assert!(text.contains("[tool.madoqua]"), "setup should show the madoqua step");
+        assert!(
+            text.contains("`biston scan . a.py b.py` is not"),
+            "setup should rule out the bare form"
+        );
+        assert!(text.contains("pass_files = false"), "setup should name the repo-wide alternative");
+    }
+
+    #[test]
     fn setup_recommends_the_dev_dependency_over_uvx() {
         let text = Topic::Setup.text();
         assert!(text.contains("uv add --dev biston"), "setup should show the dev dependency");
@@ -379,12 +392,16 @@ mod tests {
             "setup shows `biston scan .`, extraction returned {setup:?}",
         );
         assert!(
-            setup.iter().any(|argv| argv.contains(&"--files-from".to_owned())),
-            "setup shows the raw-hook recipe inside a bash fence",
+            setup.contains(&vec![
+                "biston".to_owned(),
+                "scan".to_owned(),
+                "--focus-args".to_owned(),
+            ]),
+            "setup shows the madoqua step's command; got {setup:?}",
         );
         assert!(
             setup.iter().any(|argv| argv.contains(&"--format".to_owned())),
-            "the piped `biston stats ... | jq` segment should be extracted",
+            "the `biston stats --format json .` span should be extracted",
         );
         let triage = embedded_invocations(Topic::Triage);
         assert!(

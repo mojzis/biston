@@ -18,12 +18,24 @@ exclude = ["tests/**", "**/conftest.py", "migrations/**", "vendor/**"]
 A `biston.toml` at the root is the alternative; it wins over `pyproject.toml`.
 
 **3. Baseline before you gate.** Run `biston scan .` and resolve or suppress
-every finding it reports before wiring biston into any gate; run
-`biston guide triage` for how. Adding a scanner to a dirty repo's gate gets the
-scanner removed, not the duplication.
+every finding before wiring biston into any gate; `biston guide triage` says
+how. A scanner gating a dirty repo gets removed, not the clones.
 
-**4. Integrate.** Add `biston scan .` to the check aggregator this repo already
-has. The aggregator runs the full tree and has no diff context. With poethepoet:
+**4. Integrate.** As a madoqua pre-commit step, in `pyproject.toml`:
+
+```toml
+[tool.madoqua]
+extend_check = [{ name = "biston", cmd = "biston scan --focus-args" }]
+```
+
+madoqua appends the staged Python files to `biston scan --focus-args`, which
+reads every positional as a focus file with the scan root at `.`, so only
+pairs touching a staged file are reported. `biston scan . a.py b.py` is not
+valid: without `--focus-args` at most one positional is accepted, the root.
+`pass_files = false` with `biston scan .` works too, but scans the whole tree.
+
+In the check aggregator this repo already has, which runs the full tree and
+has no diff context, the same one command. With poethepoet:
 
 ```toml
 [tool.poe.tasks]
@@ -31,24 +43,15 @@ clones = "biston scan ."
 check = ["lint", "typecheck", "clones"]
 ```
 
-`just`, `make` and `nox` are the same shape: one recipe, one command. Both
-`scan` and `stats` exit 1 on findings, 0 when clean and 2 when biston could not
-run. To gate on a count instead, redirect `biston stats --format json .` to a
-file, ignore its exit code, and test `.clone_pairs` in that file with jq.
-
-For a commit hook, with pre-commit or prek:
+Both `scan` and `stats` exit 1 on findings, 0 when clean and 2 when biston
+could not run; to gate on a count instead, write `biston stats --format json .`
+to a file and test `.clone_pairs` with jq. With pre-commit or prek:
 
 ```yaml
 - repo: https://github.com/mojzis/biston
-  rev: v0.7.0
+  rev: v0.7.1
   hooks:
     - id: biston
-```
-
-For a raw hook, with no framework:
-
-```bash
-git diff --name-only --diff-filter=ACM -- '*.py' | biston scan --files-from - .
 ```
 
 **5. Cost.** A full scan runs in ~320 ms per 100K lines of Python and ~1.1 s
