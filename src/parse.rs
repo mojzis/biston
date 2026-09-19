@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::Context;
 
@@ -7,6 +8,22 @@ pub struct ParsedFile {
     pub path: PathBuf,
     pub source: Vec<u8>,
     pub tree: tree_sitter::Tree,
+}
+
+/// The Python grammar, loaded once for the process.
+///
+/// Held in a `static` so the node-kind names it owns are `&'static str`: since
+/// tree-sitter 0.27, `Node::kind()` only lends the name for the tree's lifetime.
+static PYTHON: LazyLock<tree_sitter::Language> =
+    LazyLock::new(|| tree_sitter_python::LANGUAGE.into());
+
+/// A node's kind name (`node.kind()`), borrowed from the grammar for `'static`.
+///
+/// `kind_id` is the alias-aware symbol `Node::kind` resolves, so the two always
+/// agree for a node of a Python tree. The `ERROR` fallback is unreachable for
+/// those; it is tree-sitter's own name for a node it could not classify.
+pub(crate) fn static_kind(node: tree_sitter::Node<'_>) -> &'static str {
+    PYTHON.node_kind_for_id(node.kind_id()).unwrap_or("ERROR")
 }
 
 /// Parse a Python file from disk.
@@ -19,8 +36,7 @@ pub fn parse_file(path: &Path) -> anyhow::Result<ParsedFile> {
 /// Parse Python source bytes into a syntax tree.
 pub fn parse_bytes(source: Vec<u8>, path: PathBuf) -> anyhow::Result<ParsedFile> {
     let mut parser = tree_sitter::Parser::new();
-    let language = tree_sitter_python::LANGUAGE;
-    parser.set_language(&language.into()).context("failed to set Python language")?;
+    parser.set_language(&PYTHON).context("failed to set Python language")?;
 
     let tree =
         parser.parse(&source, None).context("tree-sitter parse returned None (cancelled?)")?;
@@ -76,5 +92,35 @@ mod tests {
         let parsed = parse_file(&path).expect("parse");
         assert_eq!(parsed.path, path);
         assert!(!parsed.tree.root_node().has_error());
+    }
+
+    #[test]
+    fn static_kind_matches_node_kind_for_every_node() {
+        // Aliased kinds, anonymous tokens and ERROR nodes must all resolve to the
+        // name `Node::kind` reports, or every normalized hash drifts.
+        let source = "@dec\nasync def f(a: int, *b, **c) -> str:\n    '''doc'''\n    \
+                      x = [i for i in b if i]\n    return f\"{x!r}\" + )\n";
+        let parsed = parse_bytes(source.as_bytes().to_vec(), PathBuf::from("t.py")).expect("parse");
+        assert!(parsed.tree.root_node().has_error(), "fixture should contain an ERROR node");
+
+        let mut cursor = parsed.tree.walk();
+        let mut seen = 0;
+        loop {
+            let node = cursor.node();
+            assert_eq!(static_kind(node), node.kind());
+            seen += 1;
+            if cursor.goto_first_child() || cursor.goto_next_sibling() {
+                continue;
+            }
+            loop {
+                if !cursor.goto_parent() {
+                    assert!(seen > 40, "walked only {seen} nodes");
+                    return;
+                }
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
     }
 }

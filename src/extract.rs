@@ -55,8 +55,8 @@ pub fn extract_functions(
 
     let mut matches = cursor.matches(query, parsed.tree.root_node(), parsed.source.as_slice());
     while let Some(m) = matches.next() {
-        let function_node = m.captures.iter().find(|c| c.index == function_idx).map(|c| c.node);
-        let name_node = m.captures.iter().find(|c| c.index == name_idx).map(|c| c.node);
+        let function_node = m.captures().iter().find(|c| c.index == function_idx).map(|c| c.node);
+        let name_node = m.captures().iter().find(|c| c.index == name_idx).map(|c| c.node);
 
         let (Some(function_node), Some(name_node)) = (function_node, name_node) else {
             continue;

@@ -15,7 +15,7 @@ clap = { version = "4.6", features = ["derive", "color"] }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-python = "0.25"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rustc-hash = "2.1"
