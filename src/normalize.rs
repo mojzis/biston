@@ -84,7 +84,7 @@ fn normalize_node(
     config: &NormalizationConfig,
     scope: &mut Scope,
 ) -> NormalizedNode {
-    let kind = node.kind();
+    let kind = crate::parse::static_kind(node);
 
     // Decorators and type annotations are replaced by a contentless placeholder:
     // the node kind survives, nothing inside it does.
