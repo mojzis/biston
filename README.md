@@ -2,6 +2,8 @@
 
 A structural clone detector for Python code. Written in Rust.
 
+📖 **[Documentation](https://mojzis.github.io/biston/)** · part of **[aesop](https://mojzis.github.io/aesop/)**, a small menagerie of tools for agentic Python
+
 It parses Python files with [tree-sitter](https://tree-sitter.github.io/tree-sitter/), normalizes the AST, and finds functions that are structurally similar to each other.
 
 ## Working with a coding agent
