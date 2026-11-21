@@ -79,3 +79,12 @@ discover (`discovery.rs`) → parse (`parse.rs`) → extract (`extract.rs`) → 
 - `plans/phase-1-structural.md`, `phase-1.5-hardening.md`, `phase-1-deviations.md`, `phase-2-antiunify.md`, `phase-2.5-near-miss-rework.md`, `phase-3-embeddings.md` — phase plans.
 - `docs/src/how-it-works.md`, `containment.md`, `commit-hooks.md` — user-facing detail (mdBook, published to <https://mojzis.github.io/biston/>).
 - `README.md` — CLI reference. `CHANGELOG.md` — released behaviour changes.
+
+## Release notes
+
+A change a user would notice adds one file to `release-notes/` in the same PR
+(`YYYY-MM-DD-short-slug.md`, frontmatter `kind: added|changed|fixed|removed`, one or two
+plain sentences). Run `uvx --from git+https://github.com/mojzis/relnotes relnotes guide` before writing one: it has the wording rules.
+Dependency bumps, CI, refactors and tests get no note. `uvx --from git+https://github.com/mojzis/relnotes relnotes check` validates them.
+The release workflow turns them into the GitHub release, the docs build into
+`docs/src/release-notes.md` (generated, gitignored), and the aesop site shows them.
