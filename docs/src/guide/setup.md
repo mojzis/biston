@@ -49,7 +49,7 @@ to a file and test `.clone_pairs` with jq. With pre-commit or prek:
 
 ```yaml
 - repo: https://github.com/mojzis/biston
-  rev: v0.7.7
+  rev: v0.7.8
   hooks:
     - id: biston
 ```

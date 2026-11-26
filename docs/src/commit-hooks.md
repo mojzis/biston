@@ -8,7 +8,7 @@ If you use the [`pre-commit`](https://pre-commit.com) framework (or [`prek`](htt
 
 ```yaml
   - repo: https://github.com/mojzis/biston
-    rev: v0.7.7
+    rev: v0.7.8
     hooks:
       - id: biston
 ```
